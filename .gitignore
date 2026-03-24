@@ -1,0 +1,32 @@
+# Build artifacts - kernel module
+driver/*.o
+driver/*.ko
+driver/*.mod
+driver/*.mod.c
+driver/*.mod.o
+driver/Module.symvers
+driver/modules.order
+driver/.*.cmd
+driver/.tmp_versions/
+
+# Build artifacts - usermode
+usermode/build/
+usermode/imgui/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MOK signing keys
+*.priv
+*.der
+
+# Analysis (generated)
+ANALYSIS.md
