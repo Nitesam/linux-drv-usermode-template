@@ -1,151 +1,76 @@
 # linux-drv-usermode-template
 
+Kernel module + usermode app for cross-process memory access on Linux. Invisible to ring-3 anti-cheat. Modular game support — swap a header to target a different game.
 
-## Overview
-
-Linux kernel module + userspace GUI for cross-process memory reading and virtual input injection. Designed to be invisible to ring-3 anti-cheat software.
-
-## Architecture
+## Structure
 
 ```
-┌─────────────────────────────────────────────────┐
-│                 Userspace App                    │
-│              (usermode/main.cpp)                 │
-│                                                  │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │ MemClient│  │ ImGui UI │  │ PID Discovery │  │
-│  │ (IOCTL)  │  │ (GL/GLFW)│  │ (/proc scan)  │  │
-│  └────┬─────┘  └──────────┘  └───────────────┘  │
-│       │                                          │
-│       │ ioctl() via ephemeral /tmp/ device node  │
-└───────┼──────────────────────────────────────────┘
-        │
-════════╪══════════════════════════════════════════════
-        │           kernel boundary
-════════╪══════════════════════════════════════════════
-        │
-┌───────┴──────────────────────────────────────────┐
-│              Kernel Module (memrw.ko)             │
-│                                                   │
-│  ┌────────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │ Memory R/W │  │ Syscall  │  │ Virtual      │  │
-│  │ (access_   │  │ Hooks    │  │ Mouse        │  │
-│  │ process_vm)│  │ (ftrace) │  │ (input_dev)  │  │
-│  └────────────┘  └──────────┘  └──────────────┘  │
-│                                                   │
-│  ┌────────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │ Module     │  │ Yama     │  │ PID Hiding   │  │
-│  │ Self-Hide  │  │ Bypass   │  │ (getdents64) │  │
-│  └────────────┘  └──────────┘  └──────────────┘  │
-└───────────────────────────────────────────────────┘
+driver/
+  memrw.c              kernel module (memory r/w, syscall hooks, stealth)
+  Makefile
+
+shared/
+  memrw_ioctl.h        IOCTL definitions shared between driver and usermode
+
+usermode/
+  main.cpp             generic app shell (GLFW/ImGui, driver comms, stealth)
+  mem_client.h         MemClient class wrapping driver IOCTLs
+  game_interface.h     abstract GameModule interface
+  logger.h             debug logger with separate console window
+  games/
+    hll/               Hell Let Loose module
+      hll_module.h     GameModule implementation (state, UI, rendering)
+      hll_reader.h     memory reader (pointer chains, player data)
+      hll_offsets.h    game offsets and structs
+
+setup.sh               build + sign + load everything
+unload.sh              unhide module + rmmod
 ```
 
-## Data Flow
+## Adding a Game
 
-### 1. Setup (setup.sh)
+1. Create `usermode/games/<name>/` with your offsets, reader, and module header
+2. Implement `GameModule` from `game_interface.h`
+3. Change two lines in `main.cpp`:
 
-```
-install deps → clone imgui → check MOK key → build driver → build usermode app → sign .ko → load module
-```
-
-- MOK key generated at `/root/NTS_WORK/mok/` for Secure Boot signing
-- Module signed with `sign-file` using SHA256
-- Module loaded with `insmod`
-
-### 2. Module Initialization (memrw_init)
-
-```
-resolve kallsyms → disable yama → alloc chrdev → install getdents64 hook → install stat hook → schedule vmouse → hide module
+```cpp
+#include "games/<name>/<name>_module.h"
+static std::unique_ptr<GameModule> create_game() { return std::make_unique<YourModule>(); }
 ```
 
-Key points:
-- Uses kprobe trick to resolve `kallsyms_lookup_name` (not exported since 5.7)
-- No `class_create()` or `device_create()` — avoids /sys/class and /dev leaks
-- Device registered only via `cdev_add()`, discoverable through /proc/devices
-- Module hides itself from `lsmod`, `/proc/modules`, and `/sys/module`
-- Virtual mouse created with 3s delay to break timing correlation
+## Controls
 
-### 3. Userspace Startup (main.cpp)
+- **INS** — toggle UI visibility
 
-```
-mask argv[0] → mask comm → open driver → hide PID → find target → start GUI
-```
+## Setup
 
-- Process disguises as `gsd-housekeeping` (GNOME settings daemon)
-- Driver discovery: reads `/proc/devices` → finds major number → `mknod` in `/tmp/` → opens fd → `unlink` immediately
-- Target process found via `/proc/<pid>/cmdline` scan with case-insensitive basename matching (supports Proton/Wine paths)
+Requires Fedora (x86_64), kernel 6.x, Secure Boot with MOK signing.
 
-### 4. Memory Read Operation
-
-```
-UI "Load" click
-    → MemClient::read_mem()
-        → ioctl(IOCTL_MEM_READ)
-            → kernel: find_get_pid → pid_task → access_process_vm(FOLL_FORCE)
-                → copy_to_user
-    → hex view display
+```bash
+sudo ./setup.sh    # builds driver + app, signs .ko, loads module
+./unload.sh         # unload when done
 ```
 
-### 5. Stealth Mechanisms
+First run generates a MOK key and prompts for enrollment — reboot to complete, then re-run setup.
 
-| Layer | Technique | What it hides |
-|-------|-----------|---------------|
-| Kernel | `list_del(THIS_MODULE->list)` | /proc/modules, lsmod |
-| Kernel | `kobject_del(mkobj.kobj)` | /sys/module/ |
-| Kernel | getdents64 ftrace hook | directory listings (PID, device name) |
-| Kernel | newfstatat ftrace hook | stat() on device/sysfs paths |
-| Kernel | No class_create/device_create | /sys/class, /dev, udev |
-| Kernel | Delayed vmouse registration | timing correlation |
-| Kernel | Yama ptrace_scope = 0 | ptrace restrictions |
-| Userspace | argv[0] overwrite | /proc/pid/cmdline |
-| Userspace | prctl(PR_SET_NAME) | /proc/pid/comm, /proc/pid/status |
-| Userspace | Ephemeral mknod + unlink | persistent /dev/ node |
-| Userspace | IOCTL_HIDE_PID | /proc/ directory listing |
+## IOCTLs
 
-### 6. Virtual Mouse
+| # | Name | Description |
+|---|------|-------------|
+| 200 | MEM_READ | read target process memory |
+| 201 | MEM_WRITE | write target process memory |
+| 202 | HIDE_PID | hide PID from /proc |
+| 203 | MOUSE_MOVE | inject mouse input (disabled) |
+| 204 | UNHIDE_MODULE | re-expose module for rmmod |
+| 205 | FIND_PID | find PID by process name |
+| 206 | GET_BASE_ADDR | get module base address |
 
-Registered as `Logitech USB Optical Mouse` (VID `046d`, PID `c077`) on a plausible USB phys path. Supports `REL_X`, `REL_Y`, `BTN_LEFT`, `BTN_RIGHT`, `BTN_MIDDLE`.
+## Stealth
 
-### 7. Unload (unload.sh)
-
-```
-ioctl(UNHIDE_MODULE) → rmmod memrw → cleanup hooks → destroy vmouse → unregister cdev
-```
-
-Module must be unhidden before rmmod can find it.
-
-## File Structure
-
-```
-├── .gitignore
-├── FLOW.md              ← this file
-├── README.md
-├── setup.sh             ← full build + sign + load pipeline
-├── unload.sh            ← safe module unload
-├── shared/
-│   └── memrw_ioctl.h    ← shared IOCTL definitions and structs
-├── driver/
-│   ├── Makefile
-│   └── memrw.c          ← kernel module source
-└── usermode/
-    ├── CMakeLists.txt
-    ├── main.cpp          ← ImGui app (read-only memory viewer)
-    ├── mem_client.h      ← IOCTL client wrapper class
-    └── imgui/            ← Dear ImGui (cloned by setup.sh)
-```
-
-## IOCTLs (magic 'U', base 200)
-
-| Code | Direction | Description |
-|------|-----------|-------------|
-| 200 | IOWR | MEM_READ — read target process memory |
-| 201 | IOW | MEM_WRITE — write target process memory |
-| 202 | IOW | HIDE_PID — hide a PID from /proc listings |
-| 203 | IOW | MOUSE_MOVE — inject relative mouse movement |
-| 204 | IO | UNHIDE_MODULE — re-expose module for rmmod |
-
-## Requirements
-
-- Fedora with kernel 6.x (x86_64)
-- Secure Boot: MOK key enrolled via `mokutil`
-- Packages: kernel-devel, gcc, cmake, glfw-devel, mesa-libGL-devel, openssl
+- Module hides from lsmod, /proc/modules
+- Syscall hooks (getdents64, newfstatat) hide device nodes and PIDs
+- No /sys/class or /dev entries created by driver
+- Usermode does zero /proc access — driver handles all process discovery
+- Process masquerades as gsd-housekeeping, X11 window spoofed
+- Device node created as hidden dot-file, permissions set at mknod time
+# linux-drv-usermode-template

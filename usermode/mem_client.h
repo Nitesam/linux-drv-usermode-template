@@ -5,7 +5,6 @@
 #include <cstring>
 #include <cstdint>
 #include <string>
-#include <fstream>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -20,32 +19,16 @@ public:
     MemClient() : fd_(-1) {}
     ~MemClient() { close_driver(); }
 
-    bool open_driver(const char *dev_name = MEMRW_DEVICE_NAME) {
-        int major = find_major_number(dev_name);
-        if (major > 0) {
-            char tmp_path[64];
-            snprintf(tmp_path, sizeof(tmp_path), "/tmp/.%s_%d", dev_name, getpid());
-
-            dev_t dev = makedev(major, 0);
-            if (mknod(tmp_path, S_IFCHR | 0600, dev) == 0) {
-                fd_ = open(tmp_path, O_RDWR);
-                unlink(tmp_path);
-                if (fd_ >= 0) {
-                    last_error_.clear();
-                    return true;
-                }
-            }
-            unlink(tmp_path);
+    bool open_driver() {
+        fd_ = open(MEMRW_HIDDEN_NODE_PATH, O_RDWR);
+        if (fd_ >= 0) {
+            last_error_.clear();
+            return true;
         }
 
-        std::string path = std::string("/dev/") + dev_name;
-        fd_ = open(path.c_str(), O_RDWR);
-        if (fd_ < 0) {
-            last_error_ = std::string("Cannot open device: ") + strerror(errno);
-            return false;
-        }
-        last_error_.clear();
-        return true;
+        last_error_ = std::string("Cannot open ") + MEMRW_HIDDEN_NODE_PATH
+                    + ": " + strerror(errno);
+        return false;
     }
 
     void close_driver() {
@@ -164,34 +147,52 @@ public:
         return true;
     }
 
+    int find_pid(const char *name) {
+        if (fd_ < 0) {
+            last_error_ = "Driver not open";
+            return -1;
+        }
+
+        struct pid_request preq;
+        memset(&preq, 0, sizeof(preq));
+        strncpy(preq.name, name, sizeof(preq.name) - 1);
+
+        int ret = ioctl(fd_, IOCTL_FIND_PID, &preq);
+        if (ret < 0) {
+            last_error_ = std::string("IOCTL_FIND_PID failed: ") + strerror(errno);
+            return -1;
+        }
+
+        last_error_.clear();
+        return preq.pid;
+    }
+
+    uint64_t get_base_address(int pid, const char *name = "") {
+        if (fd_ < 0) {
+            last_error_ = "Driver not open";
+            return 0;
+        }
+
+        struct base_addr_request breq;
+        memset(&breq, 0, sizeof(breq));
+        breq.pid = pid;
+        strncpy(breq.name, name, sizeof(breq.name) - 1);
+
+        int ret = ioctl(fd_, IOCTL_GET_BASE_ADDR, &breq);
+        if (ret < 0) {
+            last_error_ = std::string("IOCTL_GET_BASE_ADDR failed: ") + strerror(errno);
+            return 0;
+        }
+
+        last_error_.clear();
+        return breq.addr;
+    }
+
     const std::string &last_error() const { return last_error_; }
 
 private:
     int         fd_;
     std::string last_error_;
-
-    static int find_major_number(const char *name) {
-        std::ifstream f("/proc/devices");
-        if (!f.is_open()) return -1;
-
-        std::string line;
-        bool in_char_section = false;
-        while (std::getline(f, line)) {
-            if (line == "Character devices:")
-                { in_char_section = true; continue; }
-            if (line == "Block devices:")
-                break;
-            if (!in_char_section) continue;
-
-            int major = 0;
-            char dev_name[128] = {};
-            if (sscanf(line.c_str(), " %d %127s", &major, dev_name) == 2) {
-                if (strcmp(dev_name, name) == 0)
-                    return major;
-            }
-        }
-        return -1;
-    }
 };
 
 #endif

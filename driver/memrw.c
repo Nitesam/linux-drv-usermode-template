@@ -8,7 +8,9 @@
 #include <linux/slab.h>
 #include <linux/pid.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/mm.h>
+#include <linux/mm_types.h>
 #include <linux/uio.h>
 #include <linux/version.h>
 #include <linux/ftrace.h>
@@ -48,22 +50,10 @@ static dev_t          memrw_dev;
 
 static int hidden_pid = -1;
 
+#if 0
 static struct input_dev *vmouse_dev = NULL;
 static struct delayed_work vmouse_work;
-static char vmouse_phys[64] = "usb-0000:00:14.0-3/input0";
-
-static void derive_usb_phys(void)
-{
-    struct file *f;
-
-    f = filp_open("/sys/bus/pci/drivers/xhci_hcd", O_RDONLY | O_DIRECTORY, 0);
-    if (!IS_ERR(f)) {
-        filp_close(f, NULL);
-        snprintf(vmouse_phys, sizeof(vmouse_phys), "usb-0000:00:14.0-7/input0");
-    } else {
-        snprintf(vmouse_phys, sizeof(vmouse_phys), "usb-0000:00:1d.0-1.6/input0");
-    }
-}
+static char vmouse_phys[64] = "virtual-0/input0";
 
 static int create_virtual_mouse(void)
 {
@@ -74,8 +64,6 @@ static int create_virtual_mouse(void)
     vmouse_dev = input_allocate_device();
     if (!vmouse_dev)
         return -ENOMEM;
-
-    derive_usb_phys();
 
     get_random_bytes(uniq_bytes, sizeof(uniq_bytes));
     snprintf(uniq_str, sizeof(uniq_str), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -134,6 +122,7 @@ static void inject_mouse_move(int dx, int dy)
     input_report_rel(vmouse_dev, REL_Y, dy);
     input_sync(vmouse_dev);
 }
+#endif
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 static kallsyms_lookup_name_t ksym_lookup = NULL;
@@ -245,6 +234,9 @@ static bool should_hide_entry(const char *name)
     if (strcmp(name, MEMRW_CLASS_NAME) == 0)
         return true;
 
+    if (strcmp(name, MEMRW_HIDDEN_NODE_NAME) == 0)
+        return true;
+
     return false;
 }
 
@@ -319,7 +311,8 @@ static asmlinkage long hooked_newfstatat(const struct pt_regs *regs)
         filename[sizeof(filename) - 1] = '\0';
 
         if (strstr(filename, MEMRW_DEVICE_NAME) ||
-            strstr(filename, MEMRW_CLASS_NAME)) {
+            strstr(filename, MEMRW_CLASS_NAME)  ||
+            strstr(filename, MEMRW_HIDDEN_NODE_NAME)) {
             return -ENOENT;
         }
     }
@@ -400,6 +393,128 @@ static ssize_t do_mem_write(pid_t pid, unsigned long addr,
     return bytes > 0 ? bytes : -EIO;
 }
 
+static int do_find_pid_by_name(const char *name)
+{
+    struct task_struct *task;
+    int found_pid = -1;
+    size_t name_len = strlen(name);
+
+    rcu_read_lock();
+    for_each_process(task) {
+        const char *comm = task->comm;
+        size_t comm_len = strlen(comm);
+        if (comm_len == name_len) {
+            bool match = true;
+            size_t i;
+            for (i = 0; i < comm_len; ++i) {
+                char a = comm[i];
+                char b = name[i];
+                if (a >= 'A' && a <= 'Z') a += 32;
+                if (b >= 'A' && b <= 'Z') b += 32;
+                if (a != b) { match = false; break; }
+            }
+            if (match) {
+                found_pid = task->pid;
+                break;
+            }
+        }
+        if (name_len > 15 && comm_len == 15) {
+            bool match = true;
+            size_t i;
+            for (i = 0; i < 15; ++i) {
+                char a = comm[i];
+                char b = name[i];
+                if (a >= 'A' && a <= 'Z') a += 32;
+                if (b >= 'A' && b <= 'Z') b += 32;
+                if (a != b) { match = false; break; }
+            }
+            if (match) {
+                found_pid = task->pid;
+                break;
+            }
+        }
+    }
+    rcu_read_unlock();
+    return found_pid;
+}
+
+static unsigned long do_get_base_address(pid_t pid, const char *name)
+{
+    struct task_struct *task;
+    struct pid *pid_struct;
+    struct mm_struct *mm;
+    struct vm_area_struct *vma;
+    unsigned long result = 0;
+    struct vma_iterator vmi;
+
+    pid_struct = find_get_pid(pid);
+    if (!pid_struct)
+        return 0;
+
+    rcu_read_lock();
+    task = pid_task(pid_struct, PIDTYPE_PID);
+    if (!task) {
+        rcu_read_unlock();
+        put_pid(pid_struct);
+        return 0;
+    }
+    get_task_struct(task);
+    rcu_read_unlock();
+
+    mm = get_task_mm(task);
+    if (!mm) {
+        put_task_struct(task);
+        put_pid(pid_struct);
+        return 0;
+    }
+
+    mmap_read_lock(mm);
+
+    vma_iter_init(&vmi, mm, 0);
+    for_each_vma(vmi, vma) {
+        if (vma->vm_file && (vma->vm_flags & VM_EXEC)) {
+            char buf[256];
+            char *p = d_path(&vma->vm_file->f_path, buf, sizeof(buf));
+            if (!IS_ERR(p)) {
+                if (name[0] == '\0') {
+                    result = vma->vm_start;
+                    break;
+                }
+                if (strstr(p, name)) {
+                    result = vma->vm_start;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (result == 0 && name[0] != '\0') {
+        unsigned long best_start = 0;
+        unsigned long best_size  = 0;
+
+        vma_iter_init(&vmi, mm, 0);
+        for_each_vma(vmi, vma) {
+            if (!vma->vm_file && (vma->vm_flags & VM_EXEC)) {
+                unsigned long sz = vma->vm_end - vma->vm_start;
+                if (sz > best_size) {
+                    best_size  = sz;
+                    best_start = vma->vm_start;
+                }
+            }
+        }
+
+        if (best_start > 0x1000)
+            result = best_start - 0x1000;
+    }
+
+    mmap_read_unlock(mm);
+
+    mmput(mm);
+    put_task_struct(task);
+    put_pid(pid_struct);
+    return result;
+}
+
 static void unhide_module(void);
 
 static long memrw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -447,6 +562,7 @@ static long memrw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         hidden_pid = pid_to_hide;
         return 0;
 
+#if 0
     case IOCTL_MOUSE_MOVE: {
         struct mouse_request mreq;
         if (copy_from_user(&mreq, (void __user *)arg, sizeof(mreq)))
@@ -455,10 +571,33 @@ static long memrw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         inject_mouse_move(mreq.dx, mreq.dy);
         return 0;
     }
+#endif
 
     case IOCTL_UNHIDE_MODULE:
         unhide_module();
         return 0;
+
+    case IOCTL_FIND_PID: {
+        struct pid_request preq;
+        if (copy_from_user(&preq, (void __user *)arg, sizeof(preq)))
+            return -EFAULT;
+        preq.name[sizeof(preq.name) - 1] = '\0';
+        preq.pid = do_find_pid_by_name(preq.name);
+        if (copy_to_user((void __user *)arg, &preq, sizeof(preq)))
+            return -EFAULT;
+        return 0;
+    }
+
+    case IOCTL_GET_BASE_ADDR: {
+        struct base_addr_request breq;
+        if (copy_from_user(&breq, (void __user *)arg, sizeof(breq)))
+            return -EFAULT;
+        breq.name[sizeof(breq.name) - 1] = '\0';
+        breq.addr = do_get_base_address(breq.pid, breq.name);
+        if (copy_to_user((void __user *)arg, &breq, sizeof(breq)))
+            return -EFAULT;
+        return 0;
+    }
 
     default:
         return -ENOTTY;
@@ -491,7 +630,6 @@ static void hide_module(void)
 
     saved_prev = THIS_MODULE->list.prev;
     list_del(&THIS_MODULE->list);
-    kobject_del(&THIS_MODULE->mkobj.kobj);
 
     module_hidden = true;
 }
@@ -537,8 +675,10 @@ static int __init memrw_init(void)
     if (!ret)
         stat_hook_installed = true;
 
+#if 0
     INIT_DELAYED_WORK(&vmouse_work, vmouse_delayed_register);
     schedule_delayed_work(&vmouse_work, msecs_to_jiffies(3000));
+#endif
 
     hide_module();
 
@@ -553,7 +693,7 @@ static void __exit memrw_exit(void)
     if (stat_hook_installed)
         remove_hook(&newfstatat_hook);
 
-    destroy_virtual_mouse();
+
 
     cdev_del(&memrw_cdev);
     unregister_chrdev_region(memrw_dev, 1);

@@ -28,5 +28,5 @@ Thumbs.db
 *.priv
 *.der
 
-# Analysis (generated)
-ANALYSIS.md
+#OLD_PROJECT
+DMA_HLL

@@ -10,6 +10,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY /root/NTS_WORK)
 # ── Find dependencies ────────────────────────────────────────────
 find_package(OpenGL REQUIRED)
 find_package(glfw3 3.3 REQUIRED)
+find_package(X11 REQUIRED)
 
 # ── ImGui sources ────────────────────────────────────────────────
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/imgui)
@@ -33,15 +34,19 @@ add_executable(gsd-housekeeping
 target_include_directories(gsd-housekeeping PRIVATE
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared
+    ${CMAKE_CURRENT_SOURCE_DIR}/games/hll
 )
 
 target_link_libraries(gsd-housekeeping PRIVATE
     OpenGL::GL
     glfw
+    X11::X11
     dl
     pthread
 )
+
 
 target_compile_options(gsd-housekeeping PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
 target_link_options(gsd-housekeeping PRIVATE -s)
