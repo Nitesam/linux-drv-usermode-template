@@ -176,6 +176,7 @@ struct DbdPlayerData {
     DbdUEVector    position{};
     float          distance{};
     bool           valid{};
+    bool           is_local{};
     bool           is_bot{};
     int32_t        health_states{-1};
     int32_t        level{-1};

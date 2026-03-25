@@ -208,25 +208,29 @@ private:
 
             EDbdPlayerRole role = EDbdPlayerRole::Role_None;
             read_val(pid, ps + DBD_GAME_ROLE, role);
-            if (role != EDbdPlayerRole::Role_Camper && role != EDbdPlayerRole::Role_Slasher)
-                continue;
-
-            uint64_t pawn = 0;
-            read_ptr(pid, ps + DBD_PAWN_PRIVATE, pawn);
 
             DbdPlayerData p{};
             p.role = role;
             if (role == EDbdPlayerRole::Role_Camper) {
                 p.type = EDbdActorType::Survivor;
                 p.name = "Survivor";
-            } else {
+            } else if (role == EDbdPlayerRole::Role_Slasher) {
                 p.type = EDbdActorType::Killer;
                 p.name = "Killer";
+            } else {
+                p.type = EDbdActorType::Unknown;
+                p.name = "Lobby";
             }
 
             read_player_name(pid, ps, p.name);
 
-            if (pawn != 0 && pawn != local_pawn) {
+            uint64_t pawn = 0;
+            read_ptr(pid, ps + DBD_PAWN_PRIVATE, pawn);
+
+            bool is_local = (pawn != 0 && pawn == local_pawn);
+            p.is_local = is_local;
+
+            if (pawn != 0 && !is_local) {
                 p.address = pawn;
                 uint64_t root = 0;
                 DbdUEVector pos{};
@@ -247,10 +251,10 @@ private:
             p.valid = true;
 
             if (verbose)
-                LOG_CHAIN("[P] %s pawn=0x%lX pos=(%.0f,%.0f,%.0f) hp=%d lv=%d p=%d",
+                LOG_CHAIN("[P] %s pawn=0x%lX pos=(%.0f,%.0f,%.0f) hp=%d lv=%d p=%d local=%d",
                           p.name.c_str(), pawn,
                           p.position.X, p.position.Y, p.position.Z,
-                          p.health_states, p.level, p.prestige);
+                          p.health_states, p.level, p.prestige, is_local ? 1 : 0);
 
             state.players.push_back(p);
         }

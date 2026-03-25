@@ -197,6 +197,10 @@ public:
         for (const auto& p : state.players) {
             if (!p.valid)
                 continue;
+            if (p.is_local)
+                continue;
+            if (p.position.X == 0.0 && p.position.Y == 0.0 && p.position.Z == 0.0)
+                continue;
             if (p.distance > settings.max_distance && p.distance > 0)
                 continue;
             if (!dbd_w2s::IsInFront(p.position, axes))

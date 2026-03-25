@@ -74,8 +74,8 @@ public:
         ImGui::TableSetupColumn("#",        ImGuiTableColumnFlags_WidthFixed, 30);
         ImGui::TableSetupColumn("Role",     ImGuiTableColumnFlags_WidthFixed, 80);
         ImGui::TableSetupColumn("Name",     ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Dist (m)", ImGuiTableColumnFlags_WidthFixed, 65);
-        ImGui::TableSetupColumn("Position", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Prestige", ImGuiTableColumnFlags_WidthFixed, 65);
+        ImGui::TableSetupColumn("Level",    ImGuiTableColumnFlags_WidthFixed, 55);
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
@@ -93,18 +93,21 @@ public:
             ImGui::TableNextColumn();
             ImGui::TextColored(role_col, "%s",
                 p.type == EDbdActorType::Survivor ? "Survivor" : "Killer");
-            ImGui::TableNextColumn(); ImGui::Text("%s", p.name.c_str());
             ImGui::TableNextColumn();
-            if (p.distance > 0)
-                ImGui::Text("%.0f", p.distance);
+            if (p.is_local)
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s (You)", p.name.c_str());
+            else
+                ImGui::Text("%s", p.name.c_str());
+            ImGui::TableNextColumn();
+            if (p.prestige >= 0)
+                ImGui::Text("P%d", p.prestige);
             else
                 ImGui::Text("-");
-
             ImGui::TableNextColumn();
-            if (DbdIsFiniteVec(p.position))
-                ImGui::Text("%.0f,%.0f,%.0f", p.position.X, p.position.Y, p.position.Z);
+            if (p.level >= 0)
+                ImGui::Text("%d", p.level);
             else
-                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "n/a");
+                ImGui::Text("-");
         }
 
         ImGui::EndTable();
