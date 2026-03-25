@@ -4,7 +4,7 @@ project(gsd-housekeeping LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Output binary to /root/NTS_WORK
+# Output binary
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY /root/NTS_WORK)
 
 # ── Find dependencies ────────────────────────────────────────────

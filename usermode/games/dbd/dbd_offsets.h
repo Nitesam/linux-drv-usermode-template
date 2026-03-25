@@ -37,11 +37,14 @@
 #define DBD_OBJECT_CLASS                 0x10
 #define DBD_OBJECT_NAME                  0x18
 #define DBD_PLAYER_STATE                 0x02F8
+#define DBD_PAWN_PRIVATE                 0x0358
 #define DBD_ROOT_COMPONENT               0x01C8
 #define DBD_GAME_ROLE                    0x03C2
 #define DBD_PLAYER_NAME_PRIVATE          0x0378
 #define DBD_RELATIVE_LOCATION            0x0160
 #define DBD_COMPONENT_TO_WORLD           0x01E0
+
+#define DBD_GNAMES_BLOCKS_OFFSET         0x10
 
 enum class EDbdPlayerRole : uint8_t {
     Role_None     = 0,
@@ -56,6 +59,38 @@ enum class EDbdActorType : uint8_t {
     Survivor,
     Killer
 };
+
+enum class EDbdObjectType : uint8_t {
+    Generator = 0,
+    Totem,
+    Pallet,
+    Hook,
+    Hatch,
+    Locker,
+    Chest,
+    Window,
+    Trap,
+    EscapeDoor,
+    BreakableDoor,
+    OBJ_COUNT
+};
+
+inline const char* DbdObjectTypeName(EDbdObjectType t) {
+    switch (t) {
+        case EDbdObjectType::Generator:     return "Generator";
+        case EDbdObjectType::Totem:         return "Totem";
+        case EDbdObjectType::Pallet:        return "Pallet";
+        case EDbdObjectType::Hook:          return "Hook";
+        case EDbdObjectType::Hatch:         return "Hatch";
+        case EDbdObjectType::Locker:        return "Locker";
+        case EDbdObjectType::Chest:         return "Chest";
+        case EDbdObjectType::Window:        return "Window";
+        case EDbdObjectType::Trap:          return "Trap";
+        case EDbdObjectType::EscapeDoor:    return "Exit Gate";
+        case EDbdObjectType::BreakableDoor: return "Breakable";
+        default: return "?";
+    }
+}
 
 struct DbdUEVector {
     double X{}, Y{}, Z{};
@@ -92,6 +127,13 @@ struct DbdPlayerData {
     float          distance{};
     bool           valid{};
     bool           is_bot{};
+};
+
+struct DbdObjectData {
+    uint64_t        address{};
+    EDbdObjectType  type{};
+    DbdUEVector     position{};
+    float           distance{};
 };
 
 inline bool DbdIsFiniteVec(const DbdUEVector& v) {

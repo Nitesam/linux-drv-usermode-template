@@ -2,6 +2,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/fs.h>
+#include <linux/file.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/uaccess.h>
@@ -327,6 +328,9 @@ static struct ftrace_hook newfstatat_hook = {
 };
 
 static bool stat_hook_installed = false;
+
+
+
 
 static ssize_t do_mem_read(pid_t pid, unsigned long addr,
                            void *buf, size_t size)
@@ -665,7 +669,7 @@ static int __init memrw_init(void)
 
     disable_yama_ptrace();
 
-    ret = alloc_chrdev_region(&memrw_dev, 0, 1, MEMRW_DEVICE_NAME);
+    ret = alloc_chrdev_region(&memrw_dev, 0, 1, "hidraw_aux");
     if (ret < 0)
         return ret;
 
@@ -704,8 +708,6 @@ static void __exit memrw_exit(void)
 
     if (stat_hook_installed)
         remove_hook(&newfstatat_hook);
-
-
 
     cdev_del(&memrw_cdev);
     unregister_chrdev_region(memrw_dev, 1);

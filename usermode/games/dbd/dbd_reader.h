@@ -6,10 +6,12 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "mem_client.h"
 #include "logger.h"
 #include "dbd_offsets.h"
+#include "dbd_gnames.h"
 
 struct DbdWorldState {
     bool valid{};
@@ -18,6 +20,7 @@ struct DbdWorldState {
     bool has_camera{};
     uint64_t base_address{};
     std::vector<DbdPlayerData> players{};
+    std::vector<DbdObjectData> objects{};
     std::string error{};
 };
 
@@ -53,89 +56,56 @@ public:
             LOG_CHAIN("==== DBD CYCLE #%lu ====  PID=%d  Base=0x%lX", cycle_, pid, base_address);
 
         uint64_t gworld = 0;
-        uint64_t gworld_raw_steam = 0, gworld_raw_egs = 0;
-        bool steam_read_ok = false, egs_read_ok = false;
-
         {
             unsigned char raw[8]{};
-            uint64_t addr_s = base_address + DBD_STEAM_GWORLD_OFFSET;
-            if (client_.read_mem(pid, addr_s, 8, raw)) {
-                memcpy(&gworld_raw_steam, raw, 8);
-                steam_read_ok = true;
-            }
-            uint64_t addr_e = base_address + DBD_EGS_GWORLD_OFFSET;
-            if (client_.read_mem(pid, addr_e, 8, raw)) {
-                memcpy(&gworld_raw_egs, raw, 8);
-                egs_read_ok = true;
-            }
+            if (client_.read_mem(pid, base_address + DBD_EGS_GWORLD_OFFSET, 8, raw))
+                memcpy(&gworld, raw, 8);
         }
 
-        if (verbose) {
-            LOG_CHAIN("[GW] Steam  addr=0x%lX  read=%s  raw=0x%lX  ptr=%s",
-                base_address + DBD_STEAM_GWORLD_OFFSET,
-                steam_read_ok ? "OK" : "FAIL",
-                gworld_raw_steam,
-                DbdIsLikelyPointer(gworld_raw_steam) ? "YES" : "NO");
-            LOG_CHAIN("[GW] EGS    addr=0x%lX  read=%s  raw=0x%lX  ptr=%s",
-                base_address + DBD_EGS_GWORLD_OFFSET,
-                egs_read_ok ? "OK" : "FAIL",
-                gworld_raw_egs,
-                DbdIsLikelyPointer(gworld_raw_egs) ? "YES" : "NO");
-        }
-
-        if (steam_read_ok && DbdIsLikelyPointer(gworld_raw_steam))
-            gworld = gworld_raw_steam;
-        else if (egs_read_ok && DbdIsLikelyPointer(gworld_raw_egs))
-            gworld = gworld_raw_egs;
-
-        if (gworld == 0) {
-            state.error = "Failed to read GWorld";
-            LOG_ERR("GWorld FAILED at both Steam/EGS offsets");
+        if (!DbdIsLikelyPointer(gworld)) {
+            state.error = "GWorld not found";
             return state;
         }
+
         if (verbose)
             LOG_CHAIN("[1] GWorld = 0x%lX", gworld);
 
+        if (!gnames_resolved_) {
+            static const uint64_t gnames_offsets[] = {
+                DBD_EGS_GNAMES_OFFSET,
+                0x0BCCE680,
+            };
+
+            for (auto off : gnames_offsets) {
+                uint64_t addr = base_address + off;
+                gnames_.set_address(addr);
+                if (gnames_.test_resolve(client_, pid, gworld)) {
+                    gnames_resolved_ = true;
+                    break;
+                }
+            }
+            if (!gnames_resolved_)
+                LOG_CHAIN("[GN] GNames resolution FAILED for all offsets");
+        }
+
         uint64_t persistent_level = 0;
         if (!read_ptr(pid, gworld + DBD_PERSISTENT_LEVEL, persistent_level)) {
-            state.error = "Failed to read PersistentLevel";
+            state.error = "PersistentLevel failed";
             return state;
         }
+
         if (verbose)
             LOG_CHAIN("[2] PersistentLevel = 0x%lX", persistent_level);
 
-        uint64_t game_instance = 0;
-        uint64_t local_player = 0;
-        uint64_t player_controller = 0;
-        uint64_t camera_manager = 0;
-        bool chain_ok = true;
-
-        if (!read_ptr(pid, gworld + DBD_OWNING_GAME_INSTANCE, game_instance)) {
-            if (verbose) LOG_WARN("GameInstance FAILED");
-            chain_ok = false;
-        }
-
-        if (chain_ok) {
-            uint64_t local_players_arr = 0;
-            if (!read_ptr(pid, game_instance + DBD_LOCAL_PLAYERS, local_players_arr)) {
-                if (verbose) LOG_WARN("LocalPlayers FAILED");
-                chain_ok = false;
-            } else {
-                if (!read_ptr(pid, local_players_arr, local_player)) {
-                    if (verbose) LOG_WARN("LocalPlayer[0] FAILED");
-                    chain_ok = false;
-                }
-            }
-        }
-
-        if (chain_ok) {
-            if (!read_ptr(pid, local_player + DBD_PLAYER_CONTROLLER, player_controller)) {
-                if (verbose) LOG_WARN("PlayerController FAILED");
-                chain_ok = false;
-            }
-        }
-
+        uint64_t owning_instance = 0, local_players = 0;
+        uint64_t player_controller = 0, camera_manager = 0;
         uint64_t local_pawn = 0;
+
+        bool chain_ok = read_ptr(pid, gworld + DBD_OWNING_GAME_INSTANCE, owning_instance)
+                      && read_ptr(pid, owning_instance + DBD_LOCAL_PLAYERS, local_players)
+                      && read_ptr(pid, local_players, local_players)
+                      && read_ptr(pid, local_players + DBD_PLAYER_CONTROLLER, player_controller);
+
         if (chain_ok) {
             read_ptr(pid, player_controller + DBD_ACK_PAWN, local_pawn);
             if (verbose && local_pawn)
@@ -165,91 +135,138 @@ public:
                         }
                     }
                 }
-            } else {
-                if (verbose) LOG_WARN("CameraManager FAILED");
             }
         }
 
-        uint64_t direct_actors = 0;
-        uint32_t direct_count = 0;
+        read_players_from_gamestate(pid, gworld, local_pawn, state, verbose);
+
+        bool object_scan = (cycle_ % 60 == 0) || (cycle_ <= 3);
+        if (object_scan)
+            scan_objects(pid, persistent_level, state, verbose);
+        else
+            state.objects = cached_objects_;
+
+        if (state.has_camera) {
+            for (auto& obj : state.objects) {
+                obj.distance = DbdVectorDistance(obj.position, state.camera.Location) / 100.0f;
+            }
+        }
+
+        state.player_count = static_cast<int32_t>(state.players.size());
+        state.valid = true;
+
+        if (verbose) {
+            int survivors = 0, killers = 0;
+            for (auto& p : state.players) {
+                if (p.type == EDbdActorType::Survivor) survivors++;
+                else killers++;
+            }
+            LOG_CHAIN("Players: %d total (%d survivors, %d killers) | Objects: %zu",
+                      state.player_count, survivors, killers, state.objects.size());
+            LOG_CHAIN("==== END DBD CYCLE #%lu ====", cycle_);
+        } else if (cycle_ % 10 == 0) {
+            LOG_CHAIN("Cycle #%lu: %d players | %zu objects | cam=%s",
+                      cycle_, state.player_count, state.objects.size(),
+                      state.has_camera ? "OK" : "NO");
+        }
+
+        return state;
+    }
+
+private:
+    MemClient& client_;
+    uint64_t cycle_;
+    DbdGNames gnames_;
+    bool gnames_resolved_{};
+    std::vector<DbdObjectData> cached_objects_;
+
+    std::string test_gnames_resolve(int pid, uint64_t gworld) {
+        return gnames_.resolve_object_class_name(client_, pid, gworld);
+    }
+
+    void read_players_from_gamestate(int pid, uint64_t gworld, uint64_t local_pawn,
+                                     DbdWorldState& state, bool verbose)
+    {
+        uint64_t game_state = 0;
+        if (!read_ptr(pid, gworld + DBD_GAME_STATE, game_state))
+            return;
+
+        DbdTArray player_array{};
+        if (!read_val(pid, game_state + DBD_PLAYER_ARRAY, player_array))
+            return;
+        if (!DbdIsLikelyPointer(player_array.Data) || player_array.Count == 0 || player_array.Count > 20)
+            return;
+
+        if (verbose)
+            LOG_CHAIN("[PS] GameState=0x%lX PlayerArray count=%u", game_state, player_array.Count);
+
+        for (uint32_t i = 0; i < player_array.Count; ++i) {
+            uint64_t ps = 0;
+            if (!read_ptr(pid, player_array.Data + i * 8, ps)) continue;
+
+            EDbdPlayerRole role = EDbdPlayerRole::Role_None;
+            read_val(pid, ps + DBD_GAME_ROLE, role);
+            if (role != EDbdPlayerRole::Role_Camper && role != EDbdPlayerRole::Role_Slasher)
+                continue;
+
+            uint64_t pawn = 0;
+            read_ptr(pid, ps + DBD_PAWN_PRIVATE, pawn);
+
+            if (pawn == 0)
+                continue;
+
+            if (pawn == local_pawn)
+                continue;
+
+            uint64_t root = 0;
+            DbdUEVector pos{};
+            if (read_ptr(pid, pawn + DBD_ROOT_COMPONENT, root)) {
+                read_val(pid, root + DBD_RELATIVE_LOCATION, pos);
+            }
+
+            if (!DbdIsFiniteVec(pos) || (pos.X == 0.0 && pos.Y == 0.0 && pos.Z == 0.0))
+                continue;
+
+            DbdPlayerData p{};
+            p.address = pawn;
+            p.role = role;
+            if (role == EDbdPlayerRole::Role_Camper) {
+                p.type = EDbdActorType::Survivor;
+                p.name = "Survivor";
+            } else {
+                p.type = EDbdActorType::Killer;
+                p.name = "Killer";
+            }
+
+            read_player_name(pid, ps, p.name);
+
+            p.position = pos;
+            if (state.has_camera)
+                p.distance = DbdVectorDistance(pos, state.camera.Location) / 100.0f;
+            p.valid = true;
+
+            if (verbose)
+                LOG_CHAIN("[P] %s pawn=0x%lX pos=(%.0f,%.0f,%.0f)",
+                          p.name.c_str(), pawn,
+                          p.position.X, p.position.Y, p.position.Z);
+
+            state.players.push_back(p);
+        }
+    }
+
+    void scan_objects(int pid, uint64_t persistent_level,
+                      DbdWorldState& state, bool verbose)
+    {
         uint64_t actor_array = 0;
         uint32_t actor_count = 0;
 
-        if (read_ptr(pid, persistent_level + DBD_DIRECT_ACTORS_ARRAY, direct_actors)) {
-            read_val(pid, persistent_level + DBD_DIRECT_ACTORS_COUNT, direct_count);
-            if (direct_actors && direct_count > 0 && direct_count <= 2000) {
-                actor_array = direct_actors;
-                actor_count = direct_count;
-            }
-        }
+        if (read_ptr(pid, persistent_level + DBD_DIRECT_ACTORS_ARRAY, actor_array))
+            read_val(pid, persistent_level + DBD_DIRECT_ACTORS_COUNT, actor_count);
 
-        if (actor_array == 0 || actor_count == 0) {
-            uint64_t actor_cluster = 0;
-            if (read_ptr(pid, persistent_level + DBD_ACTOR_CLUSTER, actor_cluster)) {
-                DbdTArray arr{};
-                if (read_val(pid, actor_cluster + DBD_ACTOR_ARRAY, arr)) {
-                    if (arr.Data && arr.Count > 0 && arr.Count <= 2000) {
-                        actor_array = arr.Data;
-                        actor_count = arr.Count;
-                    }
-                }
-            }
-        }
+        if (actor_array == 0 || actor_count == 0 || actor_count > 3000)
+            return;
 
-        if (actor_array == 0 || actor_count == 0) {
-            DbdTArray model_comps{};
-            if (read_val(pid, persistent_level + DBD_MODEL_COMPONENTS, model_comps)) {
-                if (model_comps.Data && model_comps.Count > 0 && model_comps.Count <= 128) {
-                    for (uint32_t ci = 0; ci < model_comps.Count && actor_array == 0; ++ci) {
-                        uint64_t container = 0;
-                        if (!read_ptr(pid, model_comps.Data + ci * 8, container))
-                            continue;
-                        DbdTArray arr{};
-                        if (read_val(pid, container + DBD_ACTOR_ARRAY, arr)) {
-                            if (arr.Data && arr.Count > 0 && arr.Count <= 2000) {
-                                actor_array = arr.Data;
-                                actor_count = arr.Count;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (actor_array == 0 || actor_count == 0) {
-            state.valid = true;
-            state.error = "No actors found";
-            if (verbose) LOG_WARN("No actor array found");
-            return state;
-        }
-
-        if (verbose)
-            LOG_CHAIN("[3] ActorArray=0x%lX Count=%u", actor_array, actor_count);
-        bool full_scan = (cycle_ % 30 == 0) || (cycle_ <= 3);
-
-        if (!full_scan) {
-            for (auto& [ps_addr, entry] : stable_players_) {
-                if (entry.data.address != 0) {
-                    uint64_t root = 0;
-                    if (read_ptr(pid, entry.data.address + DBD_ROOT_COMPONENT, root)) {
-                        DbdUEVector pos{};
-                        if (read_val(pid, root + DBD_RELATIVE_LOCATION, pos)) {
-                            if (DbdIsFiniteVec(pos) && (pos.X != 0.0 || pos.Y != 0.0 || pos.Z != 0.0)) {
-                                entry.data.position = pos;
-                                if (state.has_camera)
-                                    entry.data.distance = DbdVectorDistance(pos, state.camera.Location) / 100.0f;
-                            }
-                        }
-                    }
-                }
-                state.players.push_back(entry.data);
-            }
-            state.player_count = static_cast<int32_t>(state.players.size());
-            state.valid = true;
-            return state;
-        }
-
-        uint32_t ptrs_to_read = (actor_count < 2000) ? actor_count : 2000;
+        uint32_t ptrs_to_read = (actor_count < 3000) ? actor_count : 3000;
         std::vector<uint64_t> actor_ptrs(ptrs_to_read, 0);
         {
             std::vector<unsigned char> bulk(ptrs_to_read * 8, 0);
@@ -263,137 +280,90 @@ public:
             memcpy(actor_ptrs.data(), bulk.data(), ptrs_to_read * 8);
         }
 
-        std::unordered_map<uint64_t, DbdPlayerData> frame_players;
+        std::unordered_set<uint64_t> seen_addrs;
+        int name_log_count = 0;
 
         for (uint32_t i = 0; i < ptrs_to_read; ++i) {
             uint64_t actor = actor_ptrs[i];
             if (!DbdIsLikelyPointer(actor)) continue;
 
-            uint64_t actor_ps = 0, actor_root = 0;
+            if (seen_addrs.count(actor)) continue;
 
-            if (!read_ptr(pid, actor + DBD_PLAYER_STATE, actor_ps)) continue;
+            std::string class_name = gnames_.resolve_object_class_name(client_, pid, actor);
+            if (class_name.empty()) continue;
 
-            uint64_t ps_class = 0;
-            if (!read_ptr(pid, actor_ps + 0x10, ps_class)) continue;
-
-            if (!read_ptr(pid, actor + DBD_ROOT_COMPONENT, actor_root)) continue;
-            if (!DbdIsLikelyPointer(actor_root)) continue;
-
-            EDbdPlayerRole role = EDbdPlayerRole::Role_None;
-            read_val(pid, actor_ps + DBD_GAME_ROLE, role);
-            if (role != EDbdPlayerRole::Role_Camper && role != EDbdPlayerRole::Role_Slasher)
-                continue;
-
-            if (local_pawn != 0 && actor == local_pawn) continue;
-
-            if (frame_players.count(actor_ps)) {
-                auto& existing = frame_players[actor_ps];
-                if (existing.position.X == 0.0 && existing.position.Y == 0.0) {
-                } else {
-                    continue;
-                }
+            if (verbose && name_log_count < 10) {
+                LOG_CHAIN("[OBJ-NAME] actor=0x%lX class='%s'", actor, class_name.c_str());
+                name_log_count++;
             }
 
-            DbdPlayerData p{};
-            p.address = actor;
-            p.role = role;
-            if (role == EDbdPlayerRole::Role_Camper) {
-                p.type = EDbdActorType::Survivor;
-                p.name = "Survivor";
-            } else {
-                p.type = EDbdActorType::Killer;
-                p.name = "Killer";
-            }
-
-            read_player_name(pid, actor_ps, p.name);
-
-            DbdUEVector pos{};
-            if (read_val(pid, actor_root + DBD_RELATIVE_LOCATION, pos)) {
-                if (DbdIsFiniteVec(pos) && (pos.X != 0.0 || pos.Y != 0.0 || pos.Z != 0.0)) {
-                    p.position = pos;
-                    if (state.has_camera)
-                        p.distance = DbdVectorDistance(pos, state.camera.Location) / 100.0f;
-                }
-            }
-            p.valid = true;
+            EDbdObjectType obj_type;
+            bool found = classify_object(class_name, obj_type);
+            if (!found) continue;
 
             if (verbose)
-                LOG_CHAIN("[P] %s ps=0x%lX pos=(%.0f,%.0f,%.0f)",
-                          p.name.c_str(), actor_ps,
-                          p.position.X, p.position.Y, p.position.Z);
+                LOG_CHAIN("[OBJ-MATCH] %s -> %s", class_name.c_str(), DbdObjectTypeName(obj_type));
 
-            frame_players[actor_ps] = p;
+            seen_addrs.insert(actor);
+
+            uint64_t root = 0;
+            if (!read_ptr(pid, actor + DBD_ROOT_COMPONENT, root)) continue;
+
+            DbdUEVector pos{};
+            if (!read_val(pid, root + DBD_RELATIVE_LOCATION, pos)) continue;
+            if (!DbdIsFiniteVec(pos)) continue;
+            if (pos.X == 0.0 && pos.Y == 0.0 && pos.Z == 0.0) continue;
+
+            DbdObjectData obj{};
+            obj.address = actor;
+            obj.type = obj_type;
+            obj.position = pos;
+            state.objects.push_back(obj);
         }
 
-        for (auto it = stable_players_.begin(); it != stable_players_.end(); ) {
-            if (frame_players.count(it->first)) {
-                it->second.missing_frames = 0;
-                it->second.data = frame_players[it->first];
-                ++it;
-            } else {
-                it->second.missing_frames++;
-                if (it->second.missing_frames > 10)
-                    it = stable_players_.erase(it);
-                else
-                    ++it;
-            }
-        }
-        for (auto& [ps_addr, pdata] : frame_players) {
-            if (!stable_players_.count(ps_addr)) {
-                StableEntry e;
-                e.data = pdata;
-                e.missing_frames = 0;
-                stable_players_[ps_addr] = e;
-            }
-        }
+        cached_objects_ = state.objects;
 
-        for (auto& [ps_addr, entry] : stable_players_) {
-            state.players.push_back(entry.data);
-        }
+        if (verbose)
+            LOG_CHAIN("[OBJ] Scanned %u actors, found %zu objects", ptrs_to_read, state.objects.size());
+    }
 
-        state.player_count = static_cast<int32_t>(state.players.size());
-        state.valid = true;
-
-        if (verbose) {
-            int survivors = 0, killers = 0;
-            for (auto& p : state.players) {
-                if (p.type == EDbdActorType::Survivor) survivors++;
-                else killers++;
-            }
-            LOG_CHAIN("Players: %d total (%d survivors, %d killers)",
-                      state.player_count, survivors, killers);
-            LOG_CHAIN("==== END DBD CYCLE #%lu ====", cycle_);
-        } else if (cycle_ % 10 == 0) {
-            LOG_CHAIN("Cycle #%lu: %d players | cam=%s",
-                      cycle_, state.player_count,
-                      state.has_camera ? "OK" : "NO");
-        }
-
-        return state;
+    static bool classify_object(const std::string& name, EDbdObjectType& out) {
+        if (name.find("Generator") != std::string::npos)       { out = EDbdObjectType::Generator; return true; }
+        if (name.find("Totem") != std::string::npos)            { out = EDbdObjectType::Totem; return true; }
+        if (name.find("Pallet") != std::string::npos)           { out = EDbdObjectType::Pallet; return true; }
+        if (name.find("MeatHook") != std::string::npos ||
+            name.find("Hook") != std::string::npos)             { out = EDbdObjectType::Hook; return true; }
+        if (name.find("Hatch") != std::string::npos)            { out = EDbdObjectType::Hatch; return true; }
+        if (name.find("Locker") != std::string::npos)           { out = EDbdObjectType::Locker; return true; }
+        if (name.find("Chest") != std::string::npos ||
+            name.find("Searchable") != std::string::npos)       { out = EDbdObjectType::Chest; return true; }
+        if (name.find("Window") != std::string::npos)           { out = EDbdObjectType::Window; return true; }
+        if (name.find("Trap") != std::string::npos ||
+            name.find("BearTrap") != std::string::npos)         { out = EDbdObjectType::Trap; return true; }
+        if (name.find("EscapeDoor") != std::string::npos ||
+            name.find("ExitGate") != std::string::npos)         { out = EDbdObjectType::EscapeDoor; return true; }
+        if (name.find("BreakableWall") != std::string::npos ||
+            name.find("Breakable") != std::string::npos)        { out = EDbdObjectType::BreakableDoor; return true; }
+        return false;
     }
 
     void read_player_name(int pid, uint64_t player_state, std::string& out_name) {
-        uint64_t fstring_data = 0;
-        int32_t  fstring_len = 0;
-
-        unsigned char buf[16]{};
-        if (!client_.read_mem(pid, player_state + DBD_PLAYER_NAME_PRIVATE, 16, buf))
+        DbdTArray name_arr{};
+        if (!read_val(pid, player_state + DBD_PLAYER_NAME_PRIVATE, name_arr))
             return;
-        memcpy(&fstring_data, buf, 8);
-        memcpy(&fstring_len, buf + 8, 4);
-
-        if (!DbdIsLikelyPointer(fstring_data) || fstring_len <= 0 || fstring_len > 128)
+        if (!DbdIsLikelyPointer(name_arr.Data) || name_arr.Count == 0 || name_arr.Count > 128)
             return;
 
-        uint32_t byte_len = fstring_len * 2;
-        std::vector<unsigned char> wbuf(byte_len + 2, 0);
-        if (!client_.read_mem(pid, fstring_data, byte_len, wbuf.data()))
+        uint32_t bytes = name_arr.Count * 2;
+        if (bytes > 256) bytes = 256;
+
+        std::vector<unsigned char> buf(bytes, 0);
+        if (!client_.read_mem(pid, name_arr.Data, bytes, buf.data()))
             return;
 
         std::string name;
-        name.reserve(fstring_len);
-        for (int32_t i = 0; i < fstring_len; ++i) {
-            uint16_t ch = wbuf[i * 2] | (wbuf[i * 2 + 1] << 8);
+        for (uint32_t j = 0; j < bytes; j += 2) {
+            uint16_t ch = buf[j] | (buf[j+1] << 8);
             if (ch == 0) break;
             if (ch < 128)
                 name += static_cast<char>(ch);
@@ -404,16 +374,6 @@ public:
         if (!name.empty())
             out_name = name;
     }
-
-private:
-    MemClient& client_;
-    uint64_t cycle_;
-
-    struct StableEntry {
-        DbdPlayerData data;
-        int missing_frames{};
-    };
-    std::unordered_map<uint64_t, StableEntry> stable_players_;
 };
 
 #endif

@@ -18,7 +18,7 @@ MOK_CERT="$MOK_DIR/signing_key_pub.der"
 MOK_PEM="$MOK_DIR/signing_key_pub.pem"
 
 # Device name from shared header (keep in sync with shared/memrw_ioctl.h)
-DEV_NAME="uinput_helper"
+DEV_NAME="hidraw_aux"
 
 # Kernel build dir (for sign-file tool)
 KBUILD="/usr/src/kernels/$(uname -r)"
@@ -221,7 +221,7 @@ echo "  Build outputs in: $OUTPUT_DIR"
 echo ""
 echo "  To run:"
 echo "    cd $OUTPUT_DIR"
-echo "    ./gsd-housekeeping"
+echo "    sudo ./gsd-housekeeping"
 echo ""
 echo "  To unload kernel module:"
 echo "    $SCRIPT_DIR/unload.sh"
