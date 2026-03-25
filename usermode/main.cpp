@@ -20,8 +20,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
-#include <X11/extensions/shape.h>
-#include <X11/extensions/Xfixes.h>
+
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -32,8 +31,8 @@
 #include "logger.h"
 #include "screen_info.h"
 
-#include "games/hll/hll_module.h"
-static std::unique_ptr<GameModule> create_game() { return std::make_unique<HllModule>(); }
+#include "games/dbd/dbd_module.h"
+static std::unique_ptr<GameModule> create_game() { return std::make_unique<DbdModule>(); }
 
 static MemClient          g_client;
 static int                g_target_pid   = -1;
@@ -54,18 +53,13 @@ static int                     g_screen_height = 1080;
 static Display *g_x11_dpy = nullptr;
 static Window   g_x11_win = 0;
 
+static GLFWwindow *g_glfw_window = nullptr;
+
 static void set_clickthrough(bool enable)
 {
-    if (!g_x11_dpy || !g_x11_win || g_passthrough == enable) return;
+    if (!g_glfw_window || g_passthrough == enable) return;
     g_passthrough = enable;
-    if (enable) {
-        XserverRegion region = XFixesCreateRegion(g_x11_dpy, nullptr, 0);
-        XFixesSetWindowShapeRegion(g_x11_dpy, g_x11_win, ShapeInput, 0, 0, region);
-        XFixesDestroyRegion(g_x11_dpy, region);
-    } else {
-        XFixesSetWindowShapeRegion(g_x11_dpy, g_x11_win, ShapeInput, 0, 0, None);
-    }
-    XFlush(g_x11_dpy);
+    glfwSetWindowAttrib(g_glfw_window, GLFW_MOUSE_PASSTHROUGH, enable ? GLFW_TRUE : GLFW_FALSE);
 }
 
 static void poll_global_hotkey()
@@ -205,9 +199,13 @@ int main(int argc, char **argv)
     glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
     glfwWindowHint(GLFW_FLOATING, GLFW_TRUE);
+    glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
+    glfwWindowHint(GLFW_MOUSE_PASSTHROUGH, GLFW_TRUE);
 
     GLFWwindow *window = glfwCreateWindow(g_screen_width, g_screen_height, "Settings", nullptr, nullptr);
     if (!window) { LOG_ERR("Failed to create GLFW window"); glfwTerminate(); return 1; }
+    g_glfw_window = window;
+    g_passthrough = true;
 
     {
         const auto& scr = g_screens[g_selected_screen];
@@ -216,7 +214,7 @@ int main(int argc, char **argv)
     }
 
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
+    glfwSwapInterval(0);
 
 
     {
@@ -252,8 +250,6 @@ int main(int argc, char **argv)
                                   scr.width, scr.height);
 
                 XFlush(g_x11_dpy);
-
-                set_clickthrough(true);
             }
         }
     }
@@ -291,17 +287,9 @@ int main(int argc, char **argv)
 
     std::thread reader_thread(reader_thread_func);
 
-    int raise_counter = 0;
-
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         poll_global_hotkey();
-
-        if (g_x11_dpy && g_x11_win && ++raise_counter >= 60) {
-            raise_counter = 0;
-            XRaiseWindow(g_x11_dpy, g_x11_win);
-            XFlush(g_x11_dpy);
-        }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();

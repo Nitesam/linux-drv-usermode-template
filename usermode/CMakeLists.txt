@@ -37,6 +37,7 @@ target_include_directories(gsd-housekeeping PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared
     ${CMAKE_CURRENT_SOURCE_DIR}/games/hll
+    ${CMAKE_CURRENT_SOURCE_DIR}/games/dbd
 )
 
 target_link_libraries(gsd-housekeeping PRIVATE
