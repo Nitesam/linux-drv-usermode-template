@@ -78,6 +78,17 @@ static void poll_global_hotkey()
 
 static std::unique_ptr<GameModule> g_game;
 
+static int try_find_pid(MemClient& client, GameModule* game)
+{
+    int pid = client.find_pid(game->process_name());
+    if (pid > 0) return pid;
+    for (auto name : game->alt_process_names()) {
+        pid = client.find_pid(name);
+        if (pid > 0) return pid;
+    }
+    return -1;
+}
+
 static void reader_thread_func()
 {
     auto local_game = create_game();
@@ -271,7 +282,7 @@ int main(int argc, char **argv)
             g_status_msg += " | PID hidden";
     }
 
-    g_target_pid = g_client.find_pid(g_game->process_name());
+    g_target_pid = try_find_pid(g_client, g_game.get());
     if (g_target_pid > 0) {
         g_base_address = g_client.get_base_address(g_target_pid, g_game->module_filter());
         g_status_msg += " | PID: " + std::to_string(g_target_pid);
@@ -327,7 +338,7 @@ int main(int argc, char **argv)
 
             ImGui::SameLine(ImGui::GetWindowWidth() - 180);
             if (ImGui::Button("Refresh", ImVec2(80, 0))) {
-                g_target_pid = g_client.find_pid(render_game->process_name());
+                g_target_pid = try_find_pid(g_client, render_game.get());
                 if (g_target_pid > 0) {
                     g_base_address = g_client.get_base_address(g_target_pid, render_game->module_filter());
                     g_status_msg = "PID: " + std::to_string(g_target_pid);
@@ -405,7 +416,7 @@ int main(int argc, char **argv)
 
                     ImGui::SeparatorText("Actions");
                     if (ImGui::Button("Refresh Process", ImVec2(150, 0))) {
-                        g_target_pid = g_client.find_pid(render_game->process_name());
+                        g_target_pid = try_find_pid(g_client, render_game.get());
                         if (g_target_pid > 0) {
                             g_base_address = g_client.get_base_address(g_target_pid, render_game->module_filter());
                             g_status_msg = "PID: " + std::to_string(g_target_pid);

@@ -12,6 +12,7 @@ public:
 
     virtual const char* game_name()      = 0;
     virtual const char* process_name()   = 0;
+    virtual std::vector<const char*> alt_process_names() { return {}; }
     virtual const char* module_filter()  = 0;
 
     virtual void update(MemClient& client, int pid, uint64_t base) = 0;
