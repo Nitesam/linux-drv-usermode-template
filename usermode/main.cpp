@@ -30,6 +30,7 @@
 #include "game_interface.h"
 #include "logger.h"
 #include "screen_info.h"
+#include "settings_store.h"
 
 #include "games/dbd/dbd_module.h"
 static std::unique_ptr<GameModule> create_game() { return std::make_unique<DbdModule>(); }
@@ -44,6 +45,9 @@ static bool               g_ui_visible   = false;
 static bool               g_passthrough  = false;
 static bool               g_ins_was_down = false;
 static bool               g_show_debug   = false;
+
+static SettingsStore       g_settings_store;
+static std::string         g_settings_snapshot;
 
 static std::vector<ScreenInfo> g_screens;
 static int                     g_selected_screen = 0;
@@ -180,6 +184,16 @@ int main(int argc, char **argv)
     g_game = create_game();
     LOG_INFO("Starting application (PID %d) — Game: %s", getpid(), g_game->game_name());
 
+    g_settings_store.init();
+    {
+        std::string saved = g_settings_store.load();
+        if (!saved.empty()) {
+            g_game->load_settings(saved);
+            g_settings_snapshot = saved;
+            LOG_INFO("Settings loaded from %s", g_settings_store.path.c_str());
+        }
+    }
+
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) { LOG_ERR("glfwInit failed"); return 1; }
 
@@ -272,6 +286,7 @@ int main(int argc, char **argv)
     setup_theme();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330 core");
+    glfwSwapInterval(0);
 
     if (!g_client.open_driver()) {
         g_status_msg = "Driver unavailable";
@@ -298,7 +313,14 @@ int main(int argc, char **argv)
 
     std::thread reader_thread(reader_thread_func);
 
+    static float g_fps = 0;
+    static int g_frame_count = 0;
+    static auto g_fps_timer = std::chrono::steady_clock::now();
+    constexpr double kTargetFrameTime = 1.0 / 120.0;
+
     while (!glfwWindowShouldClose(window)) {
+        auto frame_start = std::chrono::steady_clock::now();
+
         glfwPollEvents();
         poll_global_hotkey();
 
@@ -316,6 +338,18 @@ int main(int argc, char **argv)
 
         ImDrawList* fg = ImGui::GetForegroundDrawList();
         render_game->render_esp(fg, g_screen_width, g_screen_height);
+
+        g_frame_count++;
+        auto now_fps = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now_fps - g_fps_timer).count();
+        if (elapsed >= 0.5) {
+            g_fps = static_cast<float>(g_frame_count / elapsed);
+            g_frame_count = 0;
+            g_fps_timer = now_fps;
+        }
+        char fps_buf[32];
+        snprintf(fps_buf, sizeof(fps_buf), "%.0f FPS", g_fps);
+        fg->AddText(ImVec2(g_screen_width - 80.0f, 5.0f), IM_COL32(180, 180, 180, 180), fps_buf);
 
         if (g_ui_visible) {
             ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
@@ -378,7 +412,26 @@ int main(int argc, char **argv)
 
                 if (ImGui::BeginTabItem("Debug")) {
                     ImGui::BeginChild("##debug_content", ImVec2(0, content_height - 40), true);
-                    Logger::instance().render_widget();
+
+                    ImGui::SeparatorText("Status");
+                    if (render_game)
+                        render_game->render_debug_panel();
+
+                    ImGui::SeparatorText("Log");
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Copy Log")) {
+                        std::string all;
+                        auto& entries = Logger::instance().entries();
+                        for (auto& e : entries) { all += e; all += '\n'; }
+                        if (!all.empty())
+                            ImGui::SetClipboardText(all.c_str());
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Clear"))
+                        Logger::instance().clear();
+
+                    Logger::instance().render_log_only();
+
                     ImGui::EndChild();
                     ImGui::EndTabItem();
                 }
@@ -445,6 +498,24 @@ int main(int argc, char **argv)
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
+
+        auto frame_end = std::chrono::steady_clock::now();
+        double frame_elapsed = std::chrono::duration<double>(frame_end - frame_start).count();
+        if (frame_elapsed < kTargetFrameTime) {
+            double sleep_us = (kTargetFrameTime - frame_elapsed) * 1e6;
+            std::this_thread::sleep_for(std::chrono::microseconds(static_cast<long long>(sleep_us)));
+        }
+
+        {
+            std::string cur = render_game->save_settings();
+            if (cur != g_settings_snapshot) {
+                g_settings_snapshot = cur;
+                g_settings_store.mark_dirty();
+            }
+            if (g_settings_store.should_flush()) {
+                g_settings_store.save(g_settings_snapshot.c_str());
+            }
+        }
 
         {
             std::lock_guard<std::mutex> lock(g_game_mutex);

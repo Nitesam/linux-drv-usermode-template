@@ -50,10 +50,10 @@ public:
         state.base_address = base_address;
         ++cycle_;
 
-        bool verbose = (cycle_ <= 3) || (cycle_ % 60 == 0);
+        bool verbose = (cycle_ == 1);
 
         if (verbose)
-            LOG_CHAIN("==== DBD CYCLE #%lu ====  PID=%d  Base=0x%lX", cycle_, pid, base_address);
+            LOG_CHAIN("==== DBD CYCLE #1 ====  PID=%d  Base=0x%lX", pid, base_address);
 
         uint64_t gworld = 0;
         {
@@ -140,11 +140,14 @@ public:
 
         read_players_from_gamestate(pid, gworld, local_pawn, state, verbose);
 
-        bool object_scan = (cycle_ % 60 == 0) || (cycle_ <= 3);
+        bool object_scan = (cycle_ % 60 == 0) || (cycle_ == 1);
         if (object_scan)
             scan_objects(pid, persistent_level, state, verbose);
-        else
+        else {
             state.objects = cached_objects_;
+            for (auto& obj : state.objects)
+                read_object_state(pid, obj.address, obj);
+        }
 
         if (state.has_camera) {
             for (auto& obj : state.objects) {
@@ -161,13 +164,8 @@ public:
                 if (p.type == EDbdActorType::Survivor) survivors++;
                 else killers++;
             }
-            LOG_CHAIN("Players: %d total (%d survivors, %d killers) | Objects: %zu",
+            LOG_CHAIN("Players: %d (S:%d K:%d) | Objects: %zu",
                       state.player_count, survivors, killers, state.objects.size());
-            LOG_CHAIN("==== END DBD CYCLE #%lu ====", cycle_);
-        } else if (cycle_ % 10 == 0) {
-            LOG_CHAIN("Cycle #%lu: %d players | %zu objects | cam=%s",
-                      cycle_, state.player_count, state.objects.size(),
-                      state.has_camera ? "OK" : "NO");
         }
 
         return state;
@@ -179,6 +177,10 @@ private:
     DbdGNames gnames_;
     bool gnames_resolved_{};
     std::vector<DbdObjectData> cached_objects_;
+    uint32_t bone_array_offset_{};
+    int bone_info_stride_{};
+    uint32_t c2w_rot_offset_{};
+    std::unordered_set<uint64_t> bone_mapped_addrs_;
 
     std::string test_gnames_resolve(int pid, uint64_t gworld) {
         return gnames_.resolve_object_class_name(client_, pid, gworld);
@@ -212,23 +214,7 @@ private:
             uint64_t pawn = 0;
             read_ptr(pid, ps + DBD_PAWN_PRIVATE, pawn);
 
-            if (pawn == 0)
-                continue;
-
-            if (pawn == local_pawn)
-                continue;
-
-            uint64_t root = 0;
-            DbdUEVector pos{};
-            if (read_ptr(pid, pawn + DBD_ROOT_COMPONENT, root)) {
-                read_val(pid, root + DBD_RELATIVE_LOCATION, pos);
-            }
-
-            if (!DbdIsFiniteVec(pos) || (pos.X == 0.0 && pos.Y == 0.0 && pos.Z == 0.0))
-                continue;
-
             DbdPlayerData p{};
-            p.address = pawn;
             p.role = role;
             if (role == EDbdPlayerRole::Role_Camper) {
                 p.type = EDbdActorType::Survivor;
@@ -240,15 +226,31 @@ private:
 
             read_player_name(pid, ps, p.name);
 
-            p.position = pos;
-            if (state.has_camera)
-                p.distance = DbdVectorDistance(pos, state.camera.Location) / 100.0f;
+            if (pawn != 0 && pawn != local_pawn) {
+                p.address = pawn;
+                uint64_t root = 0;
+                DbdUEVector pos{};
+                if (read_ptr(pid, pawn + DBD_ROOT_COMPONENT, root))
+                    read_val(pid, root + DBD_RELATIVE_LOCATION, pos);
+
+                if (DbdIsFiniteVec(pos) && !(pos.X == 0.0 && pos.Y == 0.0 && pos.Z == 0.0)) {
+                    p.position = pos;
+                    if (state.has_camera)
+                        p.distance = DbdVectorDistance(pos, state.camera.Location) / 100.0f;
+                }
+
+                read_player_enrichment(pid, ps, pawn, p);
+            } else {
+                read_player_enrichment_lobby(pid, ps, p);
+            }
+
             p.valid = true;
 
             if (verbose)
-                LOG_CHAIN("[P] %s pawn=0x%lX pos=(%.0f,%.0f,%.0f)",
+                LOG_CHAIN("[P] %s pawn=0x%lX pos=(%.0f,%.0f,%.0f) hp=%d lv=%d p=%d",
                           p.name.c_str(), pawn,
-                          p.position.X, p.position.Y, p.position.Z);
+                          p.position.X, p.position.Y, p.position.Z,
+                          p.health_states, p.level, p.prestige);
 
             state.players.push_back(p);
         }
@@ -292,17 +294,13 @@ private:
             std::string class_name = gnames_.resolve_object_class_name(client_, pid, actor);
             if (class_name.empty()) continue;
 
-            if (verbose && name_log_count < 10) {
-                LOG_CHAIN("[OBJ-NAME] actor=0x%lX class='%s'", actor, class_name.c_str());
-                name_log_count++;
-            }
+
 
             EDbdObjectType obj_type;
             bool found = classify_object(class_name, obj_type);
             if (!found) continue;
 
-            if (verbose)
-                LOG_CHAIN("[OBJ-MATCH] %s -> %s", class_name.c_str(), DbdObjectTypeName(obj_type));
+
 
             seen_addrs.insert(actor);
 
@@ -318,13 +316,16 @@ private:
             obj.address = actor;
             obj.type = obj_type;
             obj.position = pos;
+
+            read_object_state(pid, actor, obj);
+
             state.objects.push_back(obj);
         }
 
         cached_objects_ = state.objects;
 
         if (verbose)
-            LOG_CHAIN("[OBJ] Scanned %u actors, found %zu objects", ptrs_to_read, state.objects.size());
+            LOG_CHAIN("[OBJ] Scanned %u actors, matched %zu objects", ptrs_to_read, state.objects.size());
     }
 
     static bool classify_object(const std::string& name, EDbdObjectType& out) {
@@ -332,9 +333,9 @@ private:
         if (name.find("Totem") != std::string::npos)            { out = EDbdObjectType::Totem; return true; }
         if (name.find("Pallet") != std::string::npos)           { out = EDbdObjectType::Pallet; return true; }
         if (name.find("MeatHook") != std::string::npos ||
-            name.find("Hook") != std::string::npos)             { out = EDbdObjectType::Hook; return true; }
+            name.find("Hook") != std::string::npos ||
+            name.find("Locker") != std::string::npos)           { out = EDbdObjectType::Hook; return true; }
         if (name.find("Hatch") != std::string::npos)            { out = EDbdObjectType::Hatch; return true; }
-        if (name.find("Locker") != std::string::npos)           { out = EDbdObjectType::Locker; return true; }
         if (name.find("Chest") != std::string::npos ||
             name.find("Searchable") != std::string::npos)       { out = EDbdObjectType::Chest; return true; }
         if (name.find("Window") != std::string::npos)           { out = EDbdObjectType::Window; return true; }
@@ -373,6 +374,282 @@ private:
 
         if (!name.empty())
             out_name = name;
+    }
+
+    void read_object_state(int pid, uint64_t actor, DbdObjectData& obj) {
+        switch (obj.type) {
+            case EDbdObjectType::Generator: {
+                float native_pct = 0;
+                read_val(pid, actor + 0x7B4, native_pct);
+                if (std::isfinite(native_pct) && native_pct >= 0 && native_pct <= 1.01f) {
+                    obj.gen_progress = native_pct * 100.0f;
+                    obj.gen_max_charge = 100.0f;
+                }
+                uint8_t repaired = 0;
+                read_val(pid, actor + 0x6E8, repaired);
+                if (repaired) {
+                    obj.gen_progress = 100.0f;
+                    obj.gen_max_charge = 100.0f;
+                }
+                uint8_t blocked = 0;
+                read_val(pid, actor + DBD_GEN_IS_BLOCKED, blocked);
+                obj.gen_blocked = (blocked != 0);
+                break;
+            }
+            case EDbdObjectType::Pallet: {
+                read_val(pid, actor + DBD_PALLET_STATE, obj.pallet_state);
+                break;
+            }
+            case EDbdObjectType::Totem: {
+                read_val(pid, actor + DBD_TOTEM_STATE, obj.totem_state);
+                break;
+            }
+            case EDbdObjectType::Hatch: {
+                read_val(pid, actor + DBD_HATCH_STATE, obj.hatch_state);
+                break;
+            }
+            case EDbdObjectType::Hook: {
+                uint64_t hooked = 0;
+                unsigned char hbuf[8]{};
+                if (client_.read_mem(pid, actor + DBD_HOOK_SURVIVOR, 8, hbuf)) {
+                    memcpy(&hooked, hbuf, 8);
+                    obj.hook_occupied = DbdIsLikelyPointer(hooked);
+                }
+                uint8_t basement = 0;
+                read_val(pid, actor + DBD_HOOK_IS_BASEMENT, basement);
+                obj.hook_basement = (basement != 0);
+                break;
+            }
+            case EDbdObjectType::Chest: {
+                uint8_t opened = 0;
+                read_val(pid, actor + DBD_CHEST_IS_OPENED, opened);
+                obj.chest_opened = (opened != 0);
+                break;
+            }
+            case EDbdObjectType::EscapeDoor: {
+                uint8_t activated = 0;
+                read_val(pid, actor + DBD_ESCAPE_ACTIVATED, activated);
+                obj.escape_activated = (activated != 0);
+                break;
+            }
+            default: break;
+        }
+    }
+
+    void read_player_enrichment(int pid, uint64_t ps, uint64_t pawn, DbdPlayerData& p) {
+        int32_t level = -1, prestige = -1;
+        read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_CHAR_LEVEL, level);
+        read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_PRESTIGE, prestige);
+        if (level >= 0 && level <= 100) p.level = level;
+        if (prestige >= 0 && prestige <= 100) p.prestige = prestige;
+
+        if (pawn != 0 && p.type == EDbdActorType::Survivor) {
+            uint64_t health_comp = 0;
+            if (read_ptr(pid, pawn + DBD_SURVIVOR_HEALTH_COMP, health_comp)) {
+                int32_t states = 0;
+                if (read_val(pid, health_comp + DBD_HEALTH_STATE_COUNT, states)) {
+                    if (states >= 0 && states <= 3)
+                        p.health_states = states;
+                }
+            }
+        }
+
+        read_player_bones(pid, pawn, p);
+    }
+
+    void read_player_enrichment_lobby(int pid, uint64_t ps, DbdPlayerData& p) {
+        int32_t level = -1, prestige = -1;
+        read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_CHAR_LEVEL, level);
+        read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_PRESTIGE, prestige);
+        if (level >= 0 && level <= 100) p.level = level;
+        if (prestige >= 0 && prestige <= 100) p.prestige = prestige;
+    }
+
+    void read_player_bones(int pid, uint64_t pawn, DbdPlayerData& p) {
+        memset(p.bone_map, -1, sizeof(p.bone_map));
+
+        uint64_t mesh_comp = 0;
+        if (!read_ptr(pid, pawn + DBD_CHARACTER_MESH, mesh_comp)) return;
+        if (!DbdIsLikelyPointer(mesh_comp)) return;
+        p.mesh_component = mesh_comp;
+
+        DbdUEVector base_pos = p.position;
+        base_pos.Z -= 88.0;
+
+        double qx = 0, qy = 0, qz = 0, qw = 1;
+        if (c2w_rot_offset_ == 0) {
+            unsigned char scan[0x300];
+            if (client_.read_mem(pid, mesh_comp, 0x300, scan)) {
+                for (uint32_t off = 0x100; off <= 0x280; off += 8) {
+                    double r[4];
+                    memcpy(r, scan + off, 32);
+                    double len2 = r[0]*r[0] + r[1]*r[1] + r[2]*r[2] + r[3]*r[3];
+                    if (len2 > 0.95 && len2 < 1.05 && std::isfinite(r[0])) {
+                        double tx, ty, tz;
+                        memcpy(&tx, scan + off + 32, 8);
+                        memcpy(&ty, scan + off + 40, 8);
+                        memcpy(&tz, scan + off + 48, 8);
+                        if (std::isfinite(tx) && std::abs(tx) > 100 && std::abs(tx) < 1e7) {
+                            c2w_rot_offset_ = off;
+                            LOG_CHAIN("[BONE] Found C2W quaternion at meshComp+0x%X (%.3f,%.3f,%.3f,%.3f) pos=(%.0f,%.0f,%.0f)",
+                                off, r[0], r[1], r[2], r[3], tx, ty, tz);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (c2w_rot_offset_ > 0) {
+            double rot[4]{};
+            if (read_val(pid, mesh_comp + c2w_rot_offset_, rot)) {
+                double len2 = rot[0]*rot[0] + rot[1]*rot[1] + rot[2]*rot[2] + rot[3]*rot[3];
+                if (len2 > 0.9 && len2 < 1.1)
+                    { qx = rot[0]; qy = rot[1]; qz = rot[2]; qw = rot[3]; }
+            }
+            double c2w_pos[3]{};
+            if (read_val(pid, mesh_comp + c2w_rot_offset_ + 32, c2w_pos)) {
+                if (std::isfinite(c2w_pos[0]) && std::abs(c2w_pos[0]) > 10) {
+                    base_pos.X = c2w_pos[0];
+                    base_pos.Y = c2w_pos[1];
+                    base_pos.Z = c2w_pos[2];
+                }
+            }
+        }
+
+        if (bone_array_offset_ == 0) {
+            for (uint32_t off = 0x480; off <= 0x6A0; off += 0x10) {
+                DbdTArray arr{};
+                if (!read_val(pid, mesh_comp + off, arr)) continue;
+                if (!DbdIsLikelyPointer(arr.Data)) continue;
+                if (arr.Count < 20 || arr.Count > 300) continue;
+
+                DbdFTransform test_bone{};
+                if (!read_val(pid, arr.Data, test_bone)) continue;
+                if (!std::isfinite(test_bone.PosX) || !std::isfinite(test_bone.PosY))
+                    continue;
+
+                bone_array_offset_ = off;
+                LOG_CHAIN("[BONE] Found transform array at meshComp+0x%X count=%u", off, arr.Count);
+                break;
+            }
+            if (bone_array_offset_ == 0) return;
+        }
+
+        if (gnames_resolved_ && !p.bones_mapped) {
+            resolve_bone_map(pid, mesh_comp, p);
+        }
+
+        DbdTArray bone_arr{};
+        if (!read_val(pid, mesh_comp + bone_array_offset_, bone_arr)) return;
+        if (!DbdIsLikelyPointer(bone_arr.Data)) return;
+        uint32_t count = (bone_arr.Count < DBD_MAX_BONES) ? bone_arr.Count : DBD_MAX_BONES;
+        if (count < 10) return;
+
+        uint32_t total_bytes = count * sizeof(DbdFTransform);
+        std::vector<unsigned char> bulk(total_bytes, 0);
+        for (uint32_t off = 0; off < total_bytes; ) {
+            uint32_t chunk = total_bytes - off;
+            if (chunk > 4096) chunk = 4096;
+            if (!client_.read_mem(pid, bone_arr.Data + off, chunk, &bulk[off])) return;
+            off += chunk;
+        }
+
+        p.bone_positions.resize(count);
+        const auto* transforms = reinterpret_cast<const DbdFTransform*>(bulk.data());
+        for (uint32_t i = 0; i < count; i++) {
+            double bx = transforms[i].PosX;
+            double by = transforms[i].PosY;
+            double bz = transforms[i].PosZ;
+
+            double t2x = qx*2, t2y = qy*2, t2z = qz*2;
+            double wt2x = qw*t2x, wt2y = qw*t2y, wt2z = qw*t2z;
+            double xt2x = qx*t2x, xt2y = qx*t2y, xt2z = qx*t2z;
+            double yt2y = qy*t2y, yt2z = qy*t2z, zt2z = qz*t2z;
+            double rx = (1-(yt2y+zt2z))*bx + (xt2y-wt2z)*by + (xt2z+wt2y)*bz;
+            double ry = (xt2y+wt2z)*bx + (1-(xt2x+zt2z))*by + (yt2z-wt2x)*bz;
+            double rz = (xt2z-wt2y)*bx + (yt2z+wt2x)*by + (1-(xt2x+yt2y))*bz;
+
+            p.bone_positions[i].X = base_pos.X + rx;
+            p.bone_positions[i].Y = base_pos.Y + ry;
+            p.bone_positions[i].Z = base_pos.Z + rz;
+        }
+
+        static bool bone_debug_logged = false;
+        if (!bone_debug_logged && count > 5) {
+            bone_debug_logged = true;
+            LOG_CHAIN("[BONE-DBG] base_pos=(%.0f,%.0f,%.0f)",
+                base_pos.X, base_pos.Y, base_pos.Z);
+            LOG_CHAIN("[BONE-DBG] bone[0] raw=(%.1f,%.1f,%.1f) world=(%.0f,%.0f,%.0f)",
+                transforms[0].PosX, transforms[0].PosY, transforms[0].PosZ,
+                p.bone_positions[0].X, p.bone_positions[0].Y, p.bone_positions[0].Z);
+            if (p.bones_mapped && p.bone_map[BONE_HEAD] >= 0) {
+                int hi = p.bone_map[BONE_HEAD];
+                LOG_CHAIN("[BONE-DBG] head[%d] raw=(%.1f,%.1f,%.1f)",
+                    hi, transforms[hi].PosX, transforms[hi].PosY, transforms[hi].PosZ);
+            }
+            LOG_CHAIN("[BONE-DBG] actor pos=(%.0f,%.0f,%.0f)",
+                p.position.X, p.position.Y, p.position.Z);
+        }
+    }
+
+    void resolve_bone_map(int pid, uint64_t mesh_comp, DbdPlayerData& p) {
+        uint64_t skel_mesh = 0;
+        if (!read_ptr(pid, mesh_comp + DBD_SKEL_MESH_PTR, skel_mesh)) return;
+        if (!DbdIsLikelyPointer(skel_mesh)) return;
+
+        DbdTArray bone_info{};
+        if (!read_val(pid, skel_mesh + DBD_BONE_INFO_ARRAY, bone_info)) return;
+        if (!DbdIsLikelyPointer(bone_info.Data)) return;
+        if (bone_info.Count < 10 || bone_info.Count > 300) return;
+
+        static const int strides[] = {16, 12, 20};
+        int stride = bone_info_stride_;
+
+        if (stride == 0) {
+            for (int try_stride : strides) {
+                int matched = 0;
+                for (uint32_t i = 0; i < bone_info.Count && i < 100; i++) {
+                    uint32_t fname_idx = 0;
+                    if (!read_val(pid, bone_info.Data + i * try_stride, fname_idx)) break;
+                    if (fname_idx == 0) continue;
+                    std::string name = gnames_.resolve(client_, pid, fname_idx);
+                    if (name.find("joint_") != std::string::npos) matched++;
+                }
+                if (matched >= 5) {
+                    stride = try_stride;
+                    bone_info_stride_ = try_stride;
+                    LOG_CHAIN("[BONE] BoneInfo stride=%d matched=%d bones=%u", try_stride, matched, bone_info.Count);
+                    break;
+                }
+            }
+            if (stride == 0) return;
+        }
+
+        int found = 0;
+        for (uint32_t i = 0; i < bone_info.Count && i < 200; i++) {
+            uint32_t fname_idx = 0;
+            if (!read_val(pid, bone_info.Data + i * stride, fname_idx)) continue;
+            if (fname_idx == 0) continue;
+            std::string name = gnames_.resolve(client_, pid, fname_idx);
+            if (name.empty()) continue;
+
+            for (int b = 0; b < BONE_COUNT; b++) {
+                if (name == DbdBoneNames[b]) {
+                    p.bone_map[b] = (int)i;
+                    found++;
+                    break;
+                }
+            }
+        }
+
+        if (found >= 8) {
+            p.bones_mapped = true;
+            if (!bone_mapped_addrs_.count(mesh_comp)) {
+                bone_mapped_addrs_.insert(mesh_comp);
+                LOG_CHAIN("[BONE] Mapped %d/%d bones", found, BONE_COUNT);
+            }
+        }
     }
 };
 

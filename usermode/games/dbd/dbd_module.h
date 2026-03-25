@@ -56,6 +56,9 @@ public:
         ImGui::SliderFloat("Max Dist", &esp_.settings.max_distance, 50.0f, 500.0f, "%.0f");
     }
 
+    std::string save_settings() override { return esp_.settings.to_json(); }
+    void load_settings(const std::string& json) override { esp_.settings.from_json(json); }
+
     void render_table() override {
         if (!state_.valid && !state_.error.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
@@ -113,6 +116,61 @@ public:
 
     void render_esp_controls() override {
         esp_.render_controls();
+    }
+
+    void render_debug_panel() override {
+        auto ok = ImVec4(0.3f, 1.0f, 0.3f, 1.0f);
+        auto warn = ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
+        auto fail = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+        auto dim = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+
+        if (ImGui::BeginTable("##dbg", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+            ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 130);
+            ImGui::TableSetupColumn("Value");
+
+            ImGui::TableNextColumn(); ImGui::TextColored(dim, "Base");
+            ImGui::TableNextColumn(); ImGui::Text("0x%lX", state_.base_address);
+
+            ImGui::TableNextColumn(); ImGui::TextColored(dim, "GWorld");
+            ImGui::TableNextColumn();
+            ImGui::TextColored(state_.valid ? ok : fail, "%s", state_.valid ? "OK" : "FAIL");
+
+            ImGui::TableNextColumn(); ImGui::TextColored(dim, "GNames");
+            ImGui::TableNextColumn();
+            bool gn = (reader_ && !state_.objects.empty());
+            ImGui::TextColored(gn ? ok : warn, "%s", gn ? "Resolved" : "Pending");
+
+            ImGui::TableNextColumn(); ImGui::TextColored(dim, "Camera");
+            ImGui::TableNextColumn();
+            if (state_.has_camera)
+                ImGui::Text("FOV=%.0f  (%.0f, %.0f, %.0f)",
+                    state_.camera.FOV,
+                    state_.camera.Location.X, state_.camera.Location.Y, state_.camera.Location.Z);
+            else
+                ImGui::TextColored(fail, "NO");
+
+            ImGui::TableNextColumn(); ImGui::TextColored(dim, "Players");
+            ImGui::TableNextColumn();
+            int surv = 0, kill = 0;
+            for (auto& p : state_.players) {
+                if (p.type == EDbdActorType::Survivor) surv++;
+                else kill++;
+            }
+            ImGui::Text("%d  (S:%d K:%d)", state_.player_count, surv, kill);
+
+            ImGui::TableNextColumn(); ImGui::TextColored(dim, "Objects");
+            ImGui::TableNextColumn();
+            ImGui::Text("%zu", state_.objects.size());
+
+            ImGui::TableNextColumn(); ImGui::TextColored(dim, "Bones");
+            ImGui::TableNextColumn();
+            if (!state_.players.empty() && !state_.players[0].bone_positions.empty())
+                ImGui::TextColored(ok, "%zu bones", state_.players[0].bone_positions.size());
+            else
+                ImGui::TextColored(warn, "Not found");
+
+            ImGui::EndTable();
+        }
     }
 
 private:

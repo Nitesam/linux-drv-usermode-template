@@ -93,16 +93,93 @@ inline ImU32 DbdObjectColor(EDbdObjectType t) {
 struct DbdEspSettings {
     bool  show_name     = true;
     bool  show_distance = true;
+    bool  show_boxes    = true;
+    bool  show_skeleton  = true;
     float max_distance  = 200.0f;
 
     bool  show_objects   = true;
-    float obj_max_dist   = 150.0f;
+    float obj_dist[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
+        200.0f,  // Generator
+        100.0f,  // Totem
+        60.0f,   // Pallet
+        100.0f,  // Hook
+        200.0f,  // Hatch
+        60.0f,   // Locker
+        80.0f,   // Chest
+        60.0f,   // Window
+        100.0f,  // Trap
+        200.0f,  // EscapeDoor
+        80.0f,   // BreakableDoor
+    };
     bool  obj_show[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
         true,  true,  true,  true,  true,
         true,  true,  true,  true,  true, true
     };
 
     bool  show_debug_overlay = false;
+
+    std::string to_json() const {
+        char buf[2048];
+        int n = snprintf(buf, sizeof(buf),
+            "{\n"
+            "  \"show_name\": %s,\n"
+            "  \"show_distance\": %s,\n"
+            "  \"show_boxes\": %s,\n"
+            "  \"show_skeleton\": %s,\n"
+            "  \"max_distance\": %.1f,\n"
+            "  \"show_objects\": %s,\n"
+            "  \"show_debug_overlay\": %s,\n",
+            show_name ? "true" : "false",
+            show_distance ? "true" : "false",
+            show_boxes ? "true" : "false",
+            show_skeleton ? "true" : "false",
+            max_distance,
+            show_objects ? "true" : "false",
+            show_debug_overlay ? "true" : "false");
+        for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
+            char key[64];
+            snprintf(key, sizeof(key), "  \"obj_show_%d\": %s,\n", i, obj_show[i] ? "true" : "false");
+            n += snprintf(buf + n, sizeof(buf) - n, "%s", key);
+            snprintf(key, sizeof(key), "  \"obj_dist_%d\": %.1f", i, obj_dist[i]);
+            n += snprintf(buf + n, sizeof(buf) - n, "%s%s\n",
+                key, (i < static_cast<int>(EDbdObjectType::OBJ_COUNT) - 1) ? "," : "");
+        }
+        n += snprintf(buf + n, sizeof(buf) - n, "}\n");
+        return std::string(buf, n);
+    }
+
+    void from_json(const std::string& s) {
+        if (s.empty()) return;
+        auto gb = [&](const char* k, bool d) {
+            auto p = s.find(std::string("\"") + k + "\"");
+            if (p == std::string::npos) return d;
+            p = s.find(':', p); if (p == std::string::npos) return d;
+            auto r = s.substr(p+1, 10);
+            if (r.find("true") != std::string::npos) return true;
+            if (r.find("false") != std::string::npos) return false;
+            return d;
+        };
+        auto gf = [&](const char* k, float d) {
+            auto p = s.find(std::string("\"") + k + "\"");
+            if (p == std::string::npos) return d;
+            p = s.find(':', p); if (p == std::string::npos) return d;
+            return static_cast<float>(atof(s.c_str() + p + 1));
+        };
+        show_name = gb("show_name", show_name);
+        show_distance = gb("show_distance", show_distance);
+        show_boxes = gb("show_boxes", show_boxes);
+        show_skeleton = gb("show_skeleton", show_skeleton);
+        max_distance = gf("max_distance", max_distance);
+        show_objects = gb("show_objects", show_objects);
+        show_debug_overlay = gb("show_debug_overlay", show_debug_overlay);
+        for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
+            char key[32];
+            snprintf(key, sizeof(key), "obj_show_%d", i);
+            obj_show[i] = gb(key, obj_show[i]);
+            snprintf(key, sizeof(key), "obj_dist_%d", i);
+            obj_dist[i] = gf(key, obj_dist[i]);
+        }
+    }
 };
 
 class DbdEspRenderer {
@@ -125,22 +202,67 @@ public:
             if (!dbd_w2s::IsInFront(p.position, axes))
                 continue;
 
-            DbdUEVector head_pos = p.position;
-            head_pos.Z += 90.0;
+            float half_h = (p.type == EDbdActorType::Killer) ? 96.0f : 88.0f;
 
-            auto sp = dbd_w2s::Project(head_pos, axes, ss);
-            if (!dbd_w2s::IsOnScreen(sp, ss))
+            DbdUEVector head_pos = p.position;
+            head_pos.Z += half_h;
+            DbdUEVector feet_pos = p.position;
+            feet_pos.Z -= half_h;
+
+            auto sp_head = dbd_w2s::Project(head_pos, axes, ss);
+            auto sp_feet = dbd_w2s::Project(feet_pos, axes, ss);
+
+            if (!dbd_w2s::IsOnScreen(sp_head, ss) && !dbd_w2s::IsOnScreen(sp_feet, ss))
                 continue;
 
             ImU32 col;
-            if (p.type == EDbdActorType::Survivor)
-                col = IM_COL32(0, 220, 50, 255);
-            else
+            if (p.type == EDbdActorType::Survivor) {
+                if (p.health_states == 0)      col = IM_COL32(255, 50, 50, 255);
+                else if (p.health_states == 1)  col = IM_COL32(255, 200, 50, 255);
+                else                           col = IM_COL32(0, 220, 50, 255);
+            } else {
                 col = IM_COL32(255, 50, 50, 255);
+            }
+
+            if (settings.show_boxes) {
+                float box_h = std::abs(sp_feet.Y - sp_head.Y);
+                float box_w = box_h * ((p.type == EDbdActorType::Killer) ? 0.45f : 0.38f);
+                if (box_h > 4.0f) {
+                    float cx = (sp_head.X + sp_feet.X) * 0.5f;
+                    float top = std::min(sp_head.Y, sp_feet.Y);
+                    float bot = std::max(sp_head.Y, sp_feet.Y);
+
+                    dl->AddRect(ImVec2(cx - box_w * 0.5f, top),
+                                ImVec2(cx + box_w * 0.5f, bot),
+                                col, 0, 0, 1.5f);
+
+                    if (p.type == EDbdActorType::Survivor && p.health_states >= 0) {
+                        float hw = box_w * 0.06f;
+                        float fill = (p.health_states == 2) ? 1.0f : (p.health_states == 1) ? 0.5f : 0.15f;
+                        float bar_x = cx - box_w * 0.5f - hw - 2;
+                        dl->AddRectFilled(ImVec2(bar_x, top), ImVec2(bar_x + hw, bot),
+                                          IM_COL32(30, 30, 30, 180));
+                        dl->AddRectFilled(ImVec2(bar_x, bot - (bot - top) * fill),
+                                          ImVec2(bar_x + hw, bot), col);
+                    }
+                }
+            }
 
             std::string label;
             if (settings.show_name)
                 label = p.name;
+            if (p.prestige >= 0 || p.level >= 0) {
+                char pbuf[32];
+                if (p.prestige > 0)
+                    snprintf(pbuf, sizeof(pbuf), " P%d", p.prestige);
+                else
+                    pbuf[0] = 0;
+                char lvbuf[32] = {};
+                if (p.level >= 0)
+                    snprintf(lvbuf, sizeof(lvbuf), " Lv%d", p.level);
+                label += pbuf;
+                label += lvbuf;
+            }
             if (settings.show_distance && p.distance > 0) {
                 char dbuf[32];
                 snprintf(dbuf, sizeof(dbuf), " [%dm]", static_cast<int>(p.distance));
@@ -148,15 +270,51 @@ public:
             }
 
             if (!label.empty()) {
+                float label_y = std::min(sp_head.Y, sp_feet.Y);
                 auto ts = ImGui::CalcTextSize(label.c_str());
-                float lx = sp.X - ts.x * 0.5f;
-                float ly = sp.Y - ts.y - 4.0f;
+                float lx = sp_head.X - ts.x * 0.5f;
+                float ly = label_y - ts.y - 4.0f;
 
                 dl->AddText(ImVec2(lx + 1, ly + 1), IM_COL32(0, 0, 0, 200), label.c_str());
                 dl->AddText(ImVec2(lx, ly), col, label.c_str());
             }
 
-            dl->AddCircleFilled(ImVec2(sp.X, sp.Y), 3.0f, col);
+            dl->AddCircleFilled(ImVec2(sp_head.X, sp_head.Y), 3.0f, col);
+
+            if (settings.show_skeleton && p.bones_mapped && p.bone_positions.size() > 10) {
+                static const int bone_connections[][2] = {
+                    {BONE_HEAD, BONE_NECK}, {BONE_NECK, BONE_TORSO}, {BONE_TORSO, BONE_PELVIS},
+                    {BONE_TORSO, BONE_SHOULDER_L}, {BONE_SHOULDER_L, BONE_ELBOW_L}, {BONE_ELBOW_L, BONE_HAND_L},
+                    {BONE_TORSO, BONE_SHOULDER_R}, {BONE_SHOULDER_R, BONE_ELBOW_R}, {BONE_ELBOW_R, BONE_HAND_R},
+                    {BONE_PELVIS, BONE_HIP_L}, {BONE_HIP_L, BONE_KNEE_L}, {BONE_KNEE_L, BONE_FOOT_L},
+                    {BONE_PELVIS, BONE_HIP_R}, {BONE_HIP_R, BONE_KNEE_R}, {BONE_KNEE_R, BONE_FOOT_R},
+                };
+                int num_conns = sizeof(bone_connections) / sizeof(bone_connections[0]);
+                int bc = (int)p.bone_positions.size();
+
+                ImU32 bone_col = (p.type == EDbdActorType::Survivor)
+                    ? IM_COL32(100, 255, 100, 200)
+                    : IM_COL32(255, 100, 100, 200);
+
+                for (int ci = 0; ci < num_conns; ci++) {
+                    int idx_a = p.bone_map[bone_connections[ci][0]];
+                    int idx_b = p.bone_map[bone_connections[ci][1]];
+                    if (idx_a < 0 || idx_b < 0 || idx_a >= bc || idx_b >= bc)
+                        continue;
+
+                    auto& ba = p.bone_positions[idx_a];
+                    auto& bb = p.bone_positions[idx_b];
+                    if (!dbd_w2s::IsInFront(ba, axes) || !dbd_w2s::IsInFront(bb, axes))
+                        continue;
+
+                    auto sa = dbd_w2s::Project(ba, axes, ss);
+                    auto sb = dbd_w2s::Project(bb, axes, ss);
+                    if (!dbd_w2s::IsOnScreen(sa, ss) && !dbd_w2s::IsOnScreen(sb, ss))
+                        continue;
+
+                    dl->AddLine(ImVec2(sa.X, sa.Y), ImVec2(sb.X, sb.Y), bone_col, 1.5f);
+                }
+            }
         }
 
         if (settings.show_objects) {
@@ -166,7 +324,7 @@ public:
                     continue;
                 if (!settings.obj_show[ti])
                     continue;
-                if (obj.distance > settings.obj_max_dist && obj.distance > 0)
+                if (obj.distance > settings.obj_dist[ti] && obj.distance > 0)
                     continue;
                 if (!dbd_w2s::IsInFront(obj.position, axes))
                     continue;
@@ -176,14 +334,103 @@ public:
                     continue;
 
                 ImU32 col = DbdObjectColor(obj.type);
-                const char* name = DbdObjectTypeName(obj.type);
+                const char* base_name = DbdObjectTypeName(obj.type);
 
-                char label[64];
-                snprintf(label, sizeof(label), "%s [%dm]", name, static_cast<int>(obj.distance));
+                char label[128];
+                switch (obj.type) {
+                    case EDbdObjectType::Generator: {
+                        float pct = (obj.gen_progress >= 0 && obj.gen_max_charge > 0)
+                            ? (obj.gen_progress / obj.gen_max_charge) * 100.0f : 0;
+                        if (pct > 100) pct = 100;
+                        if (obj.gen_blocked)
+                            snprintf(label, sizeof(label), "Gen [BLOCKED] [%dm]", (int)obj.distance);
+                        else if (pct >= 99.5f) {
+                            snprintf(label, sizeof(label), "Gen [DONE] [%dm]", (int)obj.distance);
+                            col = IM_COL32(50, 255, 50, 255);
+                        } else
+                            snprintf(label, sizeof(label), "Gen %.0f%% [%dm]", pct, (int)obj.distance);
+
+                        float bar_w = 40.0f, bar_h = 5.0f;
+                        float bar_x = sp.X - bar_w * 0.5f;
+                        float bar_y = sp.Y - 28.0f;
+                        float fill = pct / 100.0f;
+                        uint8_t r = (uint8_t)(255 * (1.0f - fill));
+                        uint8_t g = (uint8_t)(200 + 55 * fill);
+                        dl->AddRectFilled(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w, bar_y + bar_h),
+                                          IM_COL32(20, 20, 20, 200));
+                        if (fill > 0.005f)
+                            dl->AddRectFilled(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w * fill, bar_y + bar_h),
+                                              IM_COL32(r, g, 0, 230));
+                        dl->AddRect(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w, bar_y + bar_h),
+                                    IM_COL32(180, 180, 180, 150), 0, 0, 1.0f);
+                        break;
+                    }
+                    case EDbdObjectType::Pallet: {
+                        const char* ps = (obj.pallet_state == 0) ? "UP" :
+                                         (obj.pallet_state == 2) ? "DOWN" :
+                                         (obj.pallet_state >= 3) ? "GONE" : "";
+                        if (obj.pallet_state >= 3)
+                            col = IM_COL32(80, 80, 80, 150);
+                        else if (obj.pallet_state == 2)
+                            col = IM_COL32(255, 200, 50, 255);
+                        snprintf(label, sizeof(label), "Pallet %s [%dm]", ps, (int)obj.distance);
+                        break;
+                    }
+                    case EDbdObjectType::Totem: {
+                        const char* ts = (obj.totem_state == 1) ? "Dull" :
+                                         (obj.totem_state == 2) ? "HEX" :
+                                         (obj.totem_state == 3) ? "Boon" : "";
+                        if (obj.totem_state == 2)
+                            col = IM_COL32(255, 50, 50, 255);
+                        else if (obj.totem_state == 3)
+                            col = IM_COL32(100, 180, 255, 255);
+                        snprintf(label, sizeof(label), "Totem %s [%dm]", ts, (int)obj.distance);
+                        break;
+                    }
+                    case EDbdObjectType::Hatch: {
+                        const char* hs = (obj.hatch_state == 1) ? "OPEN" :
+                                         (obj.hatch_state == 2) ? "CLOSED" : "";
+                        if (obj.hatch_state == 1)
+                            col = IM_COL32(50, 255, 50, 255);
+                        snprintf(label, sizeof(label), "Hatch %s [%dm]", hs, (int)obj.distance);
+                        break;
+                    }
+                    case EDbdObjectType::Hook: {
+                        if (obj.hook_occupied) {
+                            snprintf(label, sizeof(label), "Hook [OCCUPIED]%s [%dm]",
+                                     obj.hook_basement ? " BM" : "", (int)obj.distance);
+                            col = IM_COL32(255, 50, 50, 255);
+                        } else {
+                            snprintf(label, sizeof(label), "Hook%s [%dm]",
+                                     obj.hook_basement ? " BM" : "", (int)obj.distance);
+                        }
+                        break;
+                    }
+                    case EDbdObjectType::Chest: {
+                        if (obj.chest_opened) {
+                            snprintf(label, sizeof(label), "Chest [Opened] [%dm]", (int)obj.distance);
+                            col = IM_COL32(100, 100, 100, 150);
+                        } else {
+                            snprintf(label, sizeof(label), "Chest [%dm]", (int)obj.distance);
+                        }
+                        break;
+                    }
+                    case EDbdObjectType::EscapeDoor: {
+                        snprintf(label, sizeof(label), "Exit %s [%dm]",
+                                 obj.escape_activated ? "OPEN" : "CLOSED", (int)obj.distance);
+                        if (obj.escape_activated)
+                            col = IM_COL32(50, 255, 50, 255);
+                        break;
+                    }
+                    default:
+                        snprintf(label, sizeof(label), "%s [%dm]", base_name, (int)obj.distance);
+                        break;
+                }
 
                 auto ts = ImGui::CalcTextSize(label);
                 float lx = sp.X - ts.x * 0.5f;
-                float ly = sp.Y - ts.y - 3.0f;
+                float ly_off = (obj.type == EDbdObjectType::Generator) ? -38.0f : -3.0f;
+                float ly = sp.Y + ly_off - ts.y;
 
                 dl->AddText(ImVec2(lx + 1, ly + 1), IM_COL32(0, 0, 0, 180), label);
                 dl->AddText(ImVec2(lx, ly), col, label);
@@ -238,12 +485,13 @@ public:
     {
         ImGui::Checkbox("Show Name", &settings.show_name);
         ImGui::Checkbox("Show Distance", &settings.show_distance);
+        ImGui::Checkbox("Show Boxes", &settings.show_boxes);
+        ImGui::Checkbox("Show Skeleton", &settings.show_skeleton);
         ImGui::SliderFloat("Max Distance (m)", &settings.max_distance, 50.0f, 500.0f, "%.0f");
 
         ImGui::Separator();
         ImGui::Checkbox("Show Objects", &settings.show_objects);
         if (settings.show_objects) {
-            ImGui::SliderFloat("Object Max Dist", &settings.obj_max_dist, 20.0f, 300.0f, "%.0f");
             ImGui::Indent(10.0f);
             for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); ++i) {
                 ImU32 col = DbdObjectColor(static_cast<EDbdObjectType>(i));
@@ -251,6 +499,13 @@ public:
                 ImGui::PushStyleColor(ImGuiCol_CheckMark, cv);
                 ImGui::Checkbox(DbdObjectTypeName(static_cast<EDbdObjectType>(i)), &settings.obj_show[i]);
                 ImGui::PopStyleColor();
+                if (settings.obj_show[i]) {
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(100);
+                    char sid[32];
+                    snprintf(sid, sizeof(sid), "##od%d", i);
+                    ImGui::SliderFloat(sid, &settings.obj_dist[i], 10.0f, 300.0f, "%.0fm");
+                }
             }
             ImGui::Unindent(10.0f);
         }

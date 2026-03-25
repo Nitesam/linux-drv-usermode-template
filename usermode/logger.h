@@ -55,34 +55,21 @@ public:
         }
 
         ImGui::Separator();
-        ImGui::BeginChild("##log_scroll", ImVec2(0, 0), false,
-                          ImGuiWindowFlags_HorizontalScrollbar);
+        render_log_inner();
+    }
 
-        ImGuiListClipper clipper;
-        clipper.Begin((int)entries_.size());
-        while (clipper.Step()) {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                const auto& e = entries_[i];
-                ImVec4 col = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
-                if (e.find("[ERROR]") != std::string::npos)
-                    col = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
-                else if (e.find("[WARN") != std::string::npos)
-                    col = ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
-                else if (e.find("[CHAIN]") != std::string::npos)
-                    col = ImVec4(0.4f, 0.7f, 1.0f, 1.0f);
-                else if (e.find("[SYSTEM]") != std::string::npos)
-                    col = ImVec4(0.2f, 0.8f, 0.4f, 1.0f);
+    void render_log_only() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        render_log_inner();
+    }
 
-                ImGui::PushStyleColor(ImGuiCol_Text, col);
-                ImGui::TextUnformatted(e.c_str());
-                ImGui::PopStyleColor();
-            }
-        }
+    const std::vector<std::string>& entries() {
+        return entries_;
+    }
 
-        if (auto_scroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 10)
-            ImGui::SetScrollHereY(1.0f);
-
-        ImGui::EndChild();
+    void clear() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        entries_.clear();
     }
 
     void shutdown() {
@@ -112,6 +99,37 @@ private:
     struct timespec start_time_;
     std::mutex mtx_;
     std::vector<std::string> entries_;
+
+    void render_log_inner() {
+        ImGui::BeginChild("##log_scroll", ImVec2(0, 0), false,
+                          ImGuiWindowFlags_HorizontalScrollbar);
+
+        ImGuiListClipper clipper;
+        clipper.Begin((int)entries_.size());
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                const auto& e = entries_[i];
+                ImVec4 col = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+                if (e.find("[ERROR]") != std::string::npos)
+                    col = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                else if (e.find("[WARN") != std::string::npos)
+                    col = ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
+                else if (e.find("[CHAIN]") != std::string::npos)
+                    col = ImVec4(0.4f, 0.7f, 1.0f, 1.0f);
+                else if (e.find("[SYSTEM]") != std::string::npos)
+                    col = ImVec4(0.2f, 0.8f, 0.4f, 1.0f);
+
+                ImGui::PushStyleColor(ImGuiCol_Text, col);
+                ImGui::TextUnformatted(e.c_str());
+                ImGui::PopStyleColor();
+            }
+        }
+
+        if (auto_scroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 10)
+            ImGui::SetScrollHereY(1.0f);
+
+        ImGui::EndChild();
+    }
 };
 
 #define LOG_INFO(fmt, ...)  Logger::instance().log("INFO",  fmt, ##__VA_ARGS__)
