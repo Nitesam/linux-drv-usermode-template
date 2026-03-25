@@ -13,9 +13,9 @@ public:
 
     const char* game_name()     override { return "Dead by Daylight"; }
     const char* process_name()  override { return "DeadByDaylight-EGS-Shipping.exe"; }
-    const char* module_filter() override { return "DeadByDaylight"; }
+    const char* module_filter() override { return "DeadByDaylight-EGS-Shipping.exe"; }
     std::vector<const char*> alt_process_names() override {
-        return {"DeadByDaylight-Win64-Shipping.exe", "DeadByDaylight"};
+        return {"GameThread"};
     }
 
     void update(MemClient& client, int pid, uint64_t base) override {

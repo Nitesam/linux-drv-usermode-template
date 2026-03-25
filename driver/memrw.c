@@ -470,19 +470,31 @@ static unsigned long do_get_base_address(pid_t pid, const char *name)
 
     mmap_read_lock(mm);
 
-    vma_iter_init(&vmi, mm, 0);
-    for_each_vma(vmi, vma) {
-        if (vma->vm_file && (vma->vm_flags & VM_EXEC)) {
-            char buf[256];
-            char *p = d_path(&vma->vm_file->f_path, buf, sizeof(buf));
-            if (!IS_ERR(p)) {
-                if (name[0] == '\0') {
+    if (name[0] != '\0') {
+        vma_iter_init(&vmi, mm, 0);
+        for_each_vma(vmi, vma) {
+            if (vma->vm_file) {
+                char buf[256];
+                char *p = d_path(&vma->vm_file->f_path, buf, sizeof(buf));
+                if (!IS_ERR(p) && strstr(p, name)) {
                     result = vma->vm_start;
                     break;
                 }
-                if (strstr(p, name)) {
-                    result = vma->vm_start;
-                    break;
+            }
+        }
+    }
+
+    if (result == 0) {
+        vma_iter_init(&vmi, mm, 0);
+        for_each_vma(vmi, vma) {
+            if (vma->vm_file && (vma->vm_flags & VM_EXEC)) {
+                char buf[256];
+                char *p = d_path(&vma->vm_file->f_path, buf, sizeof(buf));
+                if (!IS_ERR(p)) {
+                    if (name[0] == '\0') {
+                        result = vma->vm_start;
+                        break;
+                    }
                 }
             }
         }

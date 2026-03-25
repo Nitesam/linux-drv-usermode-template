@@ -6,13 +6,13 @@
 #include <cmath>
 #include <string>
 
-#define DBD_STEAM_GWORLD_OFFSET          0x0BF5AC60
-#define DBD_STEAM_GNAMES_OFFSET          0x0BCCE680
+#define DBD_STEAM_GWORLD_OFFSET          0x0BF53D30
+#define DBD_STEAM_GNAMES_OFFSET          0x0BCC7740
 #define DBD_STEAM_GOBJECTS_OFFSET        0x0BDA1D00
 
-#define DBD_EGS_GWORLD_OFFSET            0x0B875080
-#define DBD_EGS_GNAMES_OFFSET            0x0B5859B8
-#define DBD_EGS_GOBJECTS_OFFSET          0x0B6BD480
+#define DBD_EGS_GWORLD_OFFSET            0x0B877140
+#define DBD_EGS_GNAMES_OFFSET            0x0B5EBF40
+#define DBD_EGS_GOBJECTS_OFFSET          0x0B6BF540
 
 #define DBD_PERSISTENT_LEVEL             0x50
 #define DBD_OWNING_GAME_INSTANCE         0x200
@@ -21,6 +21,12 @@
 #define DBD_ACK_PAWN                     0x388
 #define DBD_CAMERA_MANAGER               0x398
 #define DBD_CAMERA_CACHE_PRIVATE         0x1400
+
+#define DBD_GAME_STATE                   0x0188
+#define DBD_PLAYER_ARRAY                 0x02F0
+#define DBD_PLAYER_DATA                  0x0558
+#define DBD_PLAYER_DATA_CHAR_LEVEL       0x0000
+#define DBD_PLAYER_DATA_PRESTIGE         0x007C
 
 #define DBD_DIRECT_ACTORS_ARRAY          0x0C0
 #define DBD_DIRECT_ACTORS_COUNT          0x0C8
@@ -35,6 +41,7 @@
 #define DBD_GAME_ROLE                    0x03C2
 #define DBD_PLAYER_NAME_PRIVATE          0x0378
 #define DBD_RELATIVE_LOCATION            0x0160
+#define DBD_COMPONENT_TO_WORLD           0x01E0
 
 enum class EDbdPlayerRole : uint8_t {
     Role_None     = 0,

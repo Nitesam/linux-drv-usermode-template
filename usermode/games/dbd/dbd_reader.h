@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #include "mem_client.h"
 #include "logger.h"
@@ -51,15 +52,46 @@ public:
         if (verbose)
             LOG_CHAIN("==== DBD CYCLE #%lu ====  PID=%d  Base=0x%lX", cycle_, pid, base_address);
 
-        uint64_t gworld_addr = base_address + DBD_STEAM_GWORLD_OFFSET;
         uint64_t gworld = 0;
-        if (!read_ptr(pid, gworld_addr, gworld)) {
-            gworld_addr = base_address + DBD_EGS_GWORLD_OFFSET;
-            if (!read_ptr(pid, gworld_addr, gworld)) {
-                state.error = "Failed to read GWorld";
-                LOG_ERR("GWorld FAILED at both Steam/EGS offsets");
-                return state;
+        uint64_t gworld_raw_steam = 0, gworld_raw_egs = 0;
+        bool steam_read_ok = false, egs_read_ok = false;
+
+        {
+            unsigned char raw[8]{};
+            uint64_t addr_s = base_address + DBD_STEAM_GWORLD_OFFSET;
+            if (client_.read_mem(pid, addr_s, 8, raw)) {
+                memcpy(&gworld_raw_steam, raw, 8);
+                steam_read_ok = true;
             }
+            uint64_t addr_e = base_address + DBD_EGS_GWORLD_OFFSET;
+            if (client_.read_mem(pid, addr_e, 8, raw)) {
+                memcpy(&gworld_raw_egs, raw, 8);
+                egs_read_ok = true;
+            }
+        }
+
+        if (verbose) {
+            LOG_CHAIN("[GW] Steam  addr=0x%lX  read=%s  raw=0x%lX  ptr=%s",
+                base_address + DBD_STEAM_GWORLD_OFFSET,
+                steam_read_ok ? "OK" : "FAIL",
+                gworld_raw_steam,
+                DbdIsLikelyPointer(gworld_raw_steam) ? "YES" : "NO");
+            LOG_CHAIN("[GW] EGS    addr=0x%lX  read=%s  raw=0x%lX  ptr=%s",
+                base_address + DBD_EGS_GWORLD_OFFSET,
+                egs_read_ok ? "OK" : "FAIL",
+                gworld_raw_egs,
+                DbdIsLikelyPointer(gworld_raw_egs) ? "YES" : "NO");
+        }
+
+        if (steam_read_ok && DbdIsLikelyPointer(gworld_raw_steam))
+            gworld = gworld_raw_steam;
+        else if (egs_read_ok && DbdIsLikelyPointer(gworld_raw_egs))
+            gworld = gworld_raw_egs;
+
+        if (gworld == 0) {
+            state.error = "Failed to read GWorld";
+            LOG_ERR("GWorld FAILED at both Steam/EGS offsets");
+            return state;
         }
         if (verbose)
             LOG_CHAIN("[1] GWorld = 0x%lX", gworld);
@@ -101,6 +133,13 @@ public:
                 if (verbose) LOG_WARN("PlayerController FAILED");
                 chain_ok = false;
             }
+        }
+
+        uint64_t local_pawn = 0;
+        if (chain_ok) {
+            read_ptr(pid, player_controller + DBD_ACK_PAWN, local_pawn);
+            if (verbose && local_pawn)
+                LOG_CHAIN("[LOCAL] Pawn=0x%lX", local_pawn);
         }
 
         if (chain_ok) {
@@ -186,75 +225,79 @@ public:
 
         if (verbose)
             LOG_CHAIN("[3] ActorArray=0x%lX Count=%u", actor_array, actor_count);
+        bool full_scan = (cycle_ % 30 == 0) || (cycle_ <= 3);
 
-        uint32_t ptrs_to_read = (actor_count < 500) ? actor_count : 500;
-        std::vector<uint64_t> actor_ptrs(ptrs_to_read, 0);
-        uint32_t bytes_per_batch = 4096 / 8;
-
-        for (uint32_t offset = 0; offset < ptrs_to_read; ) {
-            uint32_t batch = ptrs_to_read - offset;
-            if (batch > bytes_per_batch) batch = bytes_per_batch;
-            uint32_t batch_bytes = batch * 8;
-
-            unsigned char buf[4096]{};
-            if (batch_bytes > 4096) batch_bytes = 4096;
-            if (!client_.read_mem(pid, actor_array + offset * 8, batch_bytes, buf))
-                break;
-            memcpy(&actor_ptrs[offset], buf, batch_bytes);
-            offset += batch;
+        if (!full_scan) {
+            for (auto& [ps_addr, entry] : stable_players_) {
+                if (entry.data.address != 0) {
+                    uint64_t root = 0;
+                    if (read_ptr(pid, entry.data.address + DBD_ROOT_COMPONENT, root)) {
+                        DbdUEVector pos{};
+                        if (read_val(pid, root + DBD_RELATIVE_LOCATION, pos)) {
+                            if (DbdIsFiniteVec(pos) && (pos.X != 0.0 || pos.Y != 0.0 || pos.Z != 0.0)) {
+                                entry.data.position = pos;
+                                if (state.has_camera)
+                                    entry.data.distance = DbdVectorDistance(pos, state.camera.Location) / 100.0f;
+                            }
+                        }
+                    }
+                }
+                state.players.push_back(entry.data);
+            }
+            state.player_count = static_cast<int32_t>(state.players.size());
+            state.valid = true;
+            return state;
         }
 
-        struct ActorRaw {
-            uint64_t addr;
-            uint64_t player_state;
-            uint64_t ack_pawn;
-            uint64_t root_component;
-        };
+        uint32_t ptrs_to_read = (actor_count < 2000) ? actor_count : 2000;
+        std::vector<uint64_t> actor_ptrs(ptrs_to_read, 0);
+        {
+            std::vector<unsigned char> bulk(ptrs_to_read * 8, 0);
+            uint32_t total_bytes = ptrs_to_read * 8;
+            for (uint32_t off = 0; off < total_bytes; ) {
+                uint32_t chunk = total_bytes - off;
+                if (chunk > 4096) chunk = 4096;
+                if (!client_.read_mem(pid, actor_array + off, chunk, &bulk[off])) break;
+                off += chunk;
+            }
+            memcpy(actor_ptrs.data(), bulk.data(), ptrs_to_read * 8);
+        }
 
-        std::vector<ActorRaw> candidates;
+        std::unordered_map<uint64_t, DbdPlayerData> frame_players;
+
         for (uint32_t i = 0; i < ptrs_to_read; ++i) {
             uint64_t actor = actor_ptrs[i];
-            if (!DbdIsLikelyPointer(actor))
+            if (!DbdIsLikelyPointer(actor)) continue;
+
+            uint64_t actor_ps = 0, actor_root = 0;
+
+            if (!read_ptr(pid, actor + DBD_PLAYER_STATE, actor_ps)) continue;
+
+            uint64_t ps_class = 0;
+            if (!read_ptr(pid, actor_ps + 0x10, ps_class)) continue;
+
+            if (!read_ptr(pid, actor + DBD_ROOT_COMPONENT, actor_root)) continue;
+            if (!DbdIsLikelyPointer(actor_root)) continue;
+
+            EDbdPlayerRole role = EDbdPlayerRole::Role_None;
+            read_val(pid, actor_ps + DBD_GAME_ROLE, role);
+            if (role != EDbdPlayerRole::Role_Camper && role != EDbdPlayerRole::Role_Slasher)
                 continue;
 
-            ActorRaw raw{};
-            raw.addr = actor;
+            if (local_pawn != 0 && actor == local_pawn) continue;
 
-            unsigned char batch[32]{};
-            if (!client_.read_mem(pid, actor + DBD_PLAYER_STATE, 8, batch))
-                continue;
-            memcpy(&raw.player_state, batch, 8);
-
-            if (!client_.read_mem(pid, actor + DBD_ACK_PAWN, 8, batch))
-                continue;
-            memcpy(&raw.ack_pawn, batch, 8);
-
-            if (!client_.read_mem(pid, actor + DBD_ROOT_COMPONENT, 8, batch))
-                continue;
-            memcpy(&raw.root_component, batch, 8);
-
-            if (!DbdIsLikelyPointer(raw.root_component))
-                continue;
-            if (raw.ack_pawn != 0)
-                continue;
-            if (!DbdIsLikelyPointer(raw.player_state))
-                continue;
-
-            candidates.push_back(raw);
-        }
-
-        for (auto& raw : candidates) {
-            EDbdPlayerRole game_role = EDbdPlayerRole::Role_None;
-            read_val(pid, raw.player_state + DBD_GAME_ROLE, game_role);
-
-            if (game_role != EDbdPlayerRole::Role_Camper && game_role != EDbdPlayerRole::Role_Slasher)
-                continue;
+            if (frame_players.count(actor_ps)) {
+                auto& existing = frame_players[actor_ps];
+                if (existing.position.X == 0.0 && existing.position.Y == 0.0) {
+                } else {
+                    continue;
+                }
+            }
 
             DbdPlayerData p{};
-            p.address = raw.addr;
-            p.role = game_role;
-
-            if (game_role == EDbdPlayerRole::Role_Camper) {
+            p.address = actor;
+            p.role = role;
+            if (role == EDbdPlayerRole::Role_Camper) {
                 p.type = EDbdActorType::Survivor;
                 p.name = "Survivor";
             } else {
@@ -262,19 +305,50 @@ public:
                 p.name = "Killer";
             }
 
+            read_player_name(pid, actor_ps, p.name);
+
             DbdUEVector pos{};
-            if (read_val(pid, raw.root_component + DBD_RELATIVE_LOCATION, pos)) {
+            if (read_val(pid, actor_root + DBD_RELATIVE_LOCATION, pos)) {
                 if (DbdIsFiniteVec(pos) && (pos.X != 0.0 || pos.Y != 0.0 || pos.Z != 0.0)) {
                     p.position = pos;
-                    if (state.has_camera) {
+                    if (state.has_camera)
                         p.distance = DbdVectorDistance(pos, state.camera.Location) / 100.0f;
-                    }
-                    p.valid = true;
                 }
             }
+            p.valid = true;
 
-            if (p.valid)
-                state.players.push_back(p);
+            if (verbose)
+                LOG_CHAIN("[P] %s ps=0x%lX pos=(%.0f,%.0f,%.0f)",
+                          p.name.c_str(), actor_ps,
+                          p.position.X, p.position.Y, p.position.Z);
+
+            frame_players[actor_ps] = p;
+        }
+
+        for (auto it = stable_players_.begin(); it != stable_players_.end(); ) {
+            if (frame_players.count(it->first)) {
+                it->second.missing_frames = 0;
+                it->second.data = frame_players[it->first];
+                ++it;
+            } else {
+                it->second.missing_frames++;
+                if (it->second.missing_frames > 10)
+                    it = stable_players_.erase(it);
+                else
+                    ++it;
+            }
+        }
+        for (auto& [ps_addr, pdata] : frame_players) {
+            if (!stable_players_.count(ps_addr)) {
+                StableEntry e;
+                e.data = pdata;
+                e.missing_frames = 0;
+                stable_players_[ps_addr] = e;
+            }
+        }
+
+        for (auto& [ps_addr, entry] : stable_players_) {
+            state.players.push_back(entry.data);
         }
 
         state.player_count = static_cast<int32_t>(state.players.size());
@@ -298,9 +372,48 @@ public:
         return state;
     }
 
+    void read_player_name(int pid, uint64_t player_state, std::string& out_name) {
+        uint64_t fstring_data = 0;
+        int32_t  fstring_len = 0;
+
+        unsigned char buf[16]{};
+        if (!client_.read_mem(pid, player_state + DBD_PLAYER_NAME_PRIVATE, 16, buf))
+            return;
+        memcpy(&fstring_data, buf, 8);
+        memcpy(&fstring_len, buf + 8, 4);
+
+        if (!DbdIsLikelyPointer(fstring_data) || fstring_len <= 0 || fstring_len > 128)
+            return;
+
+        uint32_t byte_len = fstring_len * 2;
+        std::vector<unsigned char> wbuf(byte_len + 2, 0);
+        if (!client_.read_mem(pid, fstring_data, byte_len, wbuf.data()))
+            return;
+
+        std::string name;
+        name.reserve(fstring_len);
+        for (int32_t i = 0; i < fstring_len; ++i) {
+            uint16_t ch = wbuf[i * 2] | (wbuf[i * 2 + 1] << 8);
+            if (ch == 0) break;
+            if (ch < 128)
+                name += static_cast<char>(ch);
+            else
+                name += '?';
+        }
+
+        if (!name.empty())
+            out_name = name;
+    }
+
 private:
     MemClient& client_;
     uint64_t cycle_;
+
+    struct StableEntry {
+        DbdPlayerData data;
+        int missing_frames{};
+    };
+    std::unordered_map<uint64_t, StableEntry> stable_players_;
 };
 
 #endif
