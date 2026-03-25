@@ -244,17 +244,17 @@ public:
         }
 
         for (auto& raw : candidates) {
-            EDbdPlayerRole game_role = EDbdPlayerRole::None;
+            EDbdPlayerRole game_role = EDbdPlayerRole::Role_None;
             read_val(pid, raw.player_state + DBD_GAME_ROLE, game_role);
 
-            if (game_role != EDbdPlayerRole::Camper && game_role != EDbdPlayerRole::Slasher)
+            if (game_role != EDbdPlayerRole::Role_Camper && game_role != EDbdPlayerRole::Role_Slasher)
                 continue;
 
             DbdPlayerData p{};
             p.address = raw.addr;
             p.role = game_role;
 
-            if (game_role == EDbdPlayerRole::Camper) {
+            if (game_role == EDbdPlayerRole::Role_Camper) {
                 p.type = EDbdActorType::Survivor;
                 p.name = "Survivor";
             } else {

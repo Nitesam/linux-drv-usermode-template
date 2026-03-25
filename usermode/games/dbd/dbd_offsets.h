@@ -37,11 +37,11 @@
 #define DBD_RELATIVE_LOCATION            0x0160
 
 enum class EDbdPlayerRole : uint8_t {
-    None     = 0,
-    Slasher  = 1,
-    Camper   = 2,
-    Observer = 3,
-    Max      = 4
+    Role_None     = 0,
+    Role_Slasher  = 1,
+    Role_Camper   = 2,
+    Role_Observer = 3,
+    Role_Max      = 4
 };
 
 enum class EDbdActorType : uint8_t {
@@ -80,7 +80,7 @@ struct DbdPlayerData {
     uint64_t       address{};
     std::string    name{};
     EDbdActorType  type{EDbdActorType::Unknown};
-    EDbdPlayerRole role{EDbdPlayerRole::None};
+    EDbdPlayerRole role{EDbdPlayerRole::Role_None};
     DbdUEVector    position{};
     float          distance{};
     bool           valid{};
