@@ -2,6 +2,7 @@
 #define HLL_MODULE_H
 
 #include "../../game_interface.h"
+#include "hll_esp.h"
 #include "hll_reader.h"
 
 #include "imgui.h"
@@ -121,11 +122,20 @@ public:
         ImGui::EndTable();
     }
 
+    void render_esp(ImDrawList* draw_list, int screen_w, int screen_h) override {
+        esp_.render(draw_list, state_, screen_w, screen_h);
+    }
+
+    void render_esp_controls() override {
+        esp_.render_controls();
+    }
+
 private:
     std::unique_ptr<HllReader> reader_;
     HllWorldState state_{};
-    bool  team_filter_   = true;
-    float max_distance_  = 300.0f;
+    static inline EspRenderer esp_{};
+    static inline bool  team_filter_   = true;
+    static inline float max_distance_  = 300.0f;
 };
 
 #endif

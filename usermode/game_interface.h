@@ -4,6 +4,8 @@
 #include <string>
 #include "mem_client.h"
 
+struct ImDrawList;
+
 class GameModule {
 public:
     virtual ~GameModule() = default;
@@ -19,6 +21,8 @@ public:
 
     virtual void render_controls() {}
     virtual void render_table()    = 0;
+    virtual void render_esp(ImDrawList* draw_list, int screen_w, int screen_h) { (void)draw_list; (void)screen_w; (void)screen_h; }
+    virtual void render_esp_controls() {}
 };
 
 #endif

@@ -43,6 +43,8 @@ target_link_libraries(gsd-housekeeping PRIVATE
     OpenGL::GL
     glfw
     X11::X11
+    Xext
+    Xfixes
     dl
     pthread
 )

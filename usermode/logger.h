@@ -6,8 +6,8 @@
 #include <cstring>
 #include <ctime>
 #include <mutex>
-#include <unistd.h>
-#include <sys/types.h>
+#include <vector>
+#include <string>
 
 class Logger {
 public:
@@ -17,28 +17,15 @@ public:
     }
 
     bool init() {
-        snprintf(log_path_, sizeof(log_path_), "/tmp/.gsd_log_%d", getpid());
-        fp_ = fopen(log_path_, "w");
-        if (!fp_) return false;
-        setvbuf(fp_, nullptr, _IOLBF, 0);
-
+        std::lock_guard<std::mutex> lock(mtx_);
         clock_gettime(CLOCK_MONOTONIC, &start_time_);
-
-        fprintf(fp_, "╔══════════════════════════════════════════════════╗\n");
-        fprintf(fp_, "║            DEBUG CONSOLE INITIALIZED            ║\n");
-        fprintf(fp_, "╠══════════════════════════════════════════════════╣\n");
-        fprintf(fp_, "║  Log file: %-38s║\n", log_path_);
-        fprintf(fp_, "║  PID:      %-38d║\n", getpid());
-        fprintf(fp_, "╚══════════════════════════════════════════════════╝\n\n");
-        fflush(fp_);
-
-        fprintf(stderr, "[Logger] Log file: %s\n", log_path_);
-        spawn_console();
+        ready_ = true;
+        push("[SYSTEM] In-memory logger initialized");
         return true;
     }
 
     void log(const char* level, const char* fmt, ...) {
-        if (!fp_) return;
+        if (!ready_) return;
         std::lock_guard<std::mutex> lock(mtx_);
 
         struct timespec now;
@@ -46,52 +33,85 @@ public:
         double elapsed = (now.tv_sec - start_time_.tv_sec)
                        + (now.tv_nsec - start_time_.tv_nsec) / 1e9;
 
-        fprintf(fp_, "[%8.3f] [%-5s] ", elapsed, level);
+        char header[64];
+        snprintf(header, sizeof(header), "[%8.3f] [%-5s] ", elapsed, level);
 
+        char body[512];
         va_list args;
         va_start(args, fmt);
-        vfprintf(fp_, fmt, args);
+        vsnprintf(body, sizeof(body), fmt, args);
         va_end(args);
 
-        fputc('\n', fp_);
+        push(std::string(header) + body);
+    }
+
+    void render_widget() {
+        std::lock_guard<std::mutex> lock(mtx_);
+
+        ImGui::Text("Entries: %d / %d", (int)entries_.size(), MAX_ENTRIES);
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+            entries_.clear();
+        }
+
+        ImGui::Separator();
+        ImGui::BeginChild("##log_scroll", ImVec2(0, 0), false,
+                          ImGuiWindowFlags_HorizontalScrollbar);
+
+        ImGuiListClipper clipper;
+        clipper.Begin((int)entries_.size());
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                const auto& e = entries_[i];
+                ImVec4 col = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+                if (e.find("[ERROR]") != std::string::npos)
+                    col = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                else if (e.find("[WARN") != std::string::npos)
+                    col = ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
+                else if (e.find("[CHAIN]") != std::string::npos)
+                    col = ImVec4(0.4f, 0.7f, 1.0f, 1.0f);
+                else if (e.find("[SYSTEM]") != std::string::npos)
+                    col = ImVec4(0.2f, 0.8f, 0.4f, 1.0f);
+
+                ImGui::PushStyleColor(ImGuiCol_Text, col);
+                ImGui::TextUnformatted(e.c_str());
+                ImGui::PopStyleColor();
+            }
+        }
+
+        if (auto_scroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 10)
+            ImGui::SetScrollHereY(1.0f);
+
+        ImGui::EndChild();
     }
 
     void shutdown() {
-        if (fp_) {
-            log("INFO", "Logger shutting down");
-            fclose(fp_);
-            fp_ = nullptr;
-        }
+        std::lock_guard<std::mutex> lock(mtx_);
+        ready_ = false;
     }
 
-    const char* path() const { return log_path_; }
+    const char* path() const { return "(in-memory)"; }
 
 private:
-    Logger() : fp_(nullptr) {
-        memset(log_path_, 0, sizeof(log_path_));
+    static constexpr int MAX_ENTRIES = 2000;
+
+    Logger() : ready_(false), auto_scroll_(true) {
         memset(&start_time_, 0, sizeof(start_time_));
+        entries_.reserve(512);
     }
     ~Logger() { shutdown(); }
 
-    void spawn_console() {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-            "gnome-terminal --title=Log -- tail -n +1 -f '%s' &>/dev/null &",
-            log_path_);
-        if (system(cmd) != 0) {
-            snprintf(cmd, sizeof(cmd),
-                "xterm -T Log -geometry 140x35 -e 'tail -n +1 -f %s' &>/dev/null &",
-                log_path_);
-            if (system(cmd) != 0) {
-                fprintf(stderr, "[Logger] No terminal emulator found. Use: tail -f %s\n", log_path_);
-            }
-        }
+    void push(const std::string& line) {
+        if ((int)entries_.size() >= MAX_ENTRIES)
+            entries_.erase(entries_.begin());
+        entries_.push_back(line);
     }
 
-    FILE* fp_;
-    char log_path_[128];
+    bool ready_;
+    bool auto_scroll_;
     struct timespec start_time_;
     std::mutex mtx_;
+    std::vector<std::string> entries_;
 };
 
 #define LOG_INFO(fmt, ...)  Logger::instance().log("INFO",  fmt, ##__VA_ARGS__)

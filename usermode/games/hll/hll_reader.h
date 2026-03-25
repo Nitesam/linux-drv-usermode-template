@@ -25,6 +25,7 @@ struct PlayerData {
     bool valid{};
     bool has_location{};
     bool has_component_to_world{};
+    bool visible{};
     std::vector<FTransform> bone_transforms{};
 };
 
@@ -38,6 +39,7 @@ struct HllWorldState {
     FWeaponAmmoInfo local_ammo{};
     bool has_local_ammo{};
     uint64_t base_address{};
+    float world_time{};
     std::vector<PlayerData> players{};
     std::string error{};
 };
@@ -123,6 +125,10 @@ public:
             LOG_CHAIN("[1] GWorld       = read_ptr(0x%lX + 0x%X) → 0x%lX ✓",
                       base_address, HLL_GWORLD, gworld);
 
+        float world_time = 0.0f;
+        read_val(pid, gworld + HLL_GWORLD_TIME_SECONDS, world_time);
+        state.world_time = world_time;
+
         uint64_t game_state = 0;
         if (!read_ptr(pid, gworld + HLL_GWORLD_GAME_STATE, game_state)) {
             LOG_ERR("[Cycle %lu] ✗ GameState FAILED at GWorld(0x%lX) + 0x%X",
@@ -205,11 +211,18 @@ public:
                                         player_controller, HLL_PLAYER_CONTROLLER_CAMERA_MANAGER, camera_manager);
                 if (read_val(pid, camera_manager + HLL_CAMERA_MANAGER_CAMERA_CACHE, state.camera)) {
                     state.has_camera = true;
-                    if (verbose) LOG_CHAIN("[9] CameraCache = FOV=%.1f Pos=(%.0f,%.0f,%.0f) ✓",
-                                            state.camera.FOV,
-                                            state.camera.Location.X,
-                                            state.camera.Location.Y,
-                                            state.camera.Location.Z);
+                    LOG_DBG("[CAM] FOV=%.1f dFOV=%.1f Pos=(%.0f,%.0f,%.0f)",
+                            state.camera.FOV, state.camera.DesiredFOV,
+                            state.camera.Location.X,
+                            state.camera.Location.Y,
+                            state.camera.Location.Z);
+                    if (verbose) {
+                        LOG_CHAIN("[9] CameraCache = FOV=%.1f Pos=(%.0f,%.0f,%.0f) ✓",
+                                  state.camera.FOV,
+                                  state.camera.Location.X,
+                                  state.camera.Location.Y,
+                                  state.camera.Location.Z);
+                    }
                 } else {
                     if (verbose) LOG_WARN("[9] CameraCache FAILED at 0x%lX + 0x%X",
                                           camera_manager, HLL_CAMERA_MANAGER_CAMERA_CACHE);
