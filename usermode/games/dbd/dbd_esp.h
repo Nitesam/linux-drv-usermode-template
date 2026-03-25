@@ -117,6 +117,7 @@ struct DbdEspSettings {
     };
 
     bool  show_debug_overlay = false;
+    float esp_y_offset = 0.0f;
 
     std::string to_json() const {
         char buf[2048];
@@ -136,6 +137,7 @@ struct DbdEspSettings {
             max_distance,
             show_objects ? "true" : "false",
             show_debug_overlay ? "true" : "false");
+        n += snprintf(buf + n, sizeof(buf) - n, "  \"esp_y_offset\": %.1f,\n", esp_y_offset);
         for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
             char key[64];
             snprintf(key, sizeof(key), "  \"obj_show_%d\": %s,\n", i, obj_show[i] ? "true" : "false");
@@ -172,6 +174,7 @@ struct DbdEspSettings {
         max_distance = gf("max_distance", max_distance);
         show_objects = gb("show_objects", show_objects);
         show_debug_overlay = gb("show_debug_overlay", show_debug_overlay);
+        esp_y_offset = gf("esp_y_offset", esp_y_offset);
         for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
             char key[32];
             snprintf(key, sizeof(key), "obj_show_%d", i);
@@ -193,6 +196,7 @@ public:
 
         const dbd_w2s::ScreenSize ss{sw, sh};
         const auto axes = dbd_w2s::BuildAxes(state.camera);
+        const float y_off = settings.esp_y_offset;
 
         for (const auto& p : state.players) {
             if (!p.valid)
@@ -215,6 +219,7 @@ public:
 
             auto sp_head = dbd_w2s::Project(head_pos, axes, ss);
             auto sp_feet = dbd_w2s::Project(feet_pos, axes, ss);
+            sp_head.Y += y_off; sp_feet.Y += y_off;
 
             if (!dbd_w2s::IsOnScreen(sp_head, ss) && !dbd_w2s::IsOnScreen(sp_feet, ss))
                 continue;
@@ -313,6 +318,7 @@ public:
 
                     auto sa = dbd_w2s::Project(ba, axes, ss);
                     auto sb = dbd_w2s::Project(bb, axes, ss);
+                    sa.Y += y_off; sb.Y += y_off;
                     if (!dbd_w2s::IsOnScreen(sa, ss) && !dbd_w2s::IsOnScreen(sb, ss))
                         continue;
 
@@ -334,6 +340,7 @@ public:
                     continue;
 
                 auto sp = dbd_w2s::Project(obj.position, axes, ss);
+                sp.Y += y_off;
                 if (!dbd_w2s::IsOnScreen(sp, ss))
                     continue;
 
@@ -492,6 +499,7 @@ public:
         ImGui::Checkbox("Show Boxes", &settings.show_boxes);
         ImGui::Checkbox("Show Skeleton", &settings.show_skeleton);
         ImGui::SliderFloat("Max Distance (m)", &settings.max_distance, 50.0f, 500.0f, "%.0f");
+        ImGui::SliderFloat("Y Offset", &settings.esp_y_offset, -50.0f, 50.0f, "%.0f px");
 
         ImGui::Separator();
         ImGui::Checkbox("Show Objects", &settings.show_objects);

@@ -114,24 +114,21 @@ public:
 
         if (chain_ok) {
             if (read_ptr(pid, player_controller + DBD_CAMERA_MANAGER, camera_manager)) {
-                DbdCameraCacheEntry cache{};
-                if (read_val(pid, camera_manager + DBD_CAMERA_CACHE_PRIVATE, cache)) {
-                    if (std::isfinite(cache.POV.FOV) && cache.POV.FOV > 1.0f && cache.POV.FOV < 180.0f) {
-                        state.camera = cache.POV;
-                        state.has_camera = true;
-                        if (verbose)
-                            LOG_CHAIN("[CAM] FOV=%.1f Pos=(%.0f,%.0f,%.0f)",
-                                      state.camera.FOV,
-                                      state.camera.Location.X,
-                                      state.camera.Location.Y,
-                                      state.camera.Location.Z);
-                    } else {
-                        DbdCameraCacheEntry cache2{};
-                        if (read_val(pid, camera_manager + DBD_CAMERA_CACHE_PRIVATE + 0x8, cache2.POV)) {
-                            if (std::isfinite(cache2.POV.FOV) && cache2.POV.FOV > 1.0f && cache2.POV.FOV < 180.0f) {
-                                state.camera = cache2.POV;
-                                state.has_camera = true;
-                            }
+                bool cam_found = false;
+                for (uint32_t cam_off = 0; cam_off <= 0x20 && !cam_found; cam_off += 0x8) {
+                    DbdMinimalViewInfo pov{};
+                    if (read_val(pid, camera_manager + DBD_CAMERA_CACHE_PRIVATE + 0x10 + cam_off, pov)) {
+                        if (std::isfinite(pov.FOV) && pov.FOV > 1.0f && pov.FOV < 180.0f &&
+                            std::isfinite(pov.Location.X) && std::abs(pov.Location.X) > 100 &&
+                            std::isfinite(pov.Rotation.Pitch) && std::abs(pov.Rotation.Pitch) < 89.0) {
+                            state.camera = pov;
+                            state.has_camera = true;
+                            cam_found = true;
+                            if (verbose)
+                                LOG_CHAIN("[CAM] off=+0x%X FOV=%.1f Pos=(%.0f,%.0f,%.0f) Pitch=%.1f Yaw=%.1f",
+                                          cam_off, pov.FOV,
+                                          pov.Location.X, pov.Location.Y, pov.Location.Z,
+                                          pov.Rotation.Pitch, pov.Rotation.Yaw);
                         }
                     }
                 }
