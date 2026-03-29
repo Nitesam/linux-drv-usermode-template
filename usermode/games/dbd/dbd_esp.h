@@ -194,6 +194,8 @@ public:
         if (!state.valid || !state.has_camera)
             return;
 
+        dl->PushClipRect(ImVec2(0, 0), ImVec2((float)sw, (float)sh), true);
+
         const dbd_w2s::ScreenSize ss{sw, sh};
         const auto axes = dbd_w2s::BuildAxes(state.camera);
         const float y_off = settings.esp_y_offset;
@@ -258,7 +260,7 @@ public:
             }
 
             std::string label;
-            if (settings.show_name)
+            if (settings.show_name && p.name[0])
                 label = p.name;
             if (p.prestige >= 0 || p.level >= 0) {
                 char pbuf[32];
@@ -290,7 +292,7 @@ public:
 
             dl->AddCircleFilled(ImVec2(sp_head.X, sp_head.Y), 3.0f, col);
 
-            if (settings.show_skeleton && p.bones_mapped && p.bone_positions.size() > 10) {
+            if (settings.show_skeleton && p.bones_mapped && p.bone_count > 10) {
                 static const int bone_connections[][2] = {
                     {BONE_HEAD, BONE_NECK}, {BONE_NECK, BONE_TORSO}, {BONE_TORSO, BONE_PELVIS},
                     {BONE_TORSO, BONE_SHOULDER_L}, {BONE_SHOULDER_L, BONE_ELBOW_L}, {BONE_ELBOW_L, BONE_HAND_L},
@@ -299,7 +301,7 @@ public:
                     {BONE_PELVIS, BONE_HIP_R}, {BONE_HIP_R, BONE_KNEE_R}, {BONE_KNEE_R, BONE_FOOT_R},
                 };
                 int num_conns = sizeof(bone_connections) / sizeof(bone_connections[0]);
-                int bc = (int)p.bone_positions.size();
+                int bc = (int)p.bone_count;
 
                 ImU32 bone_col = (p.type == EDbdActorType::Survivor)
                     ? IM_COL32(100, 255, 100, 200)
@@ -490,6 +492,8 @@ public:
                 dl->AddText(ImVec2(x, y + i * line_h), c, lines[i]);
             }
         }
+
+        dl->PopClipRect();
     }
 
     void render_controls()

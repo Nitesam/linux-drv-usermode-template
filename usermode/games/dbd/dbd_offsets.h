@@ -170,7 +170,7 @@ inline const char* DbdBoneNames[BONE_COUNT] = {
 
 struct DbdPlayerData {
     uint64_t       address{};
-    std::string    name{};
+    char           name[64]{};
     EDbdActorType  type{EDbdActorType::Unknown};
     EDbdPlayerRole role{EDbdPlayerRole::Role_None};
     DbdUEVector    position{};
@@ -182,7 +182,8 @@ struct DbdPlayerData {
     int32_t        level{-1};
     int32_t        prestige{-1};
     uint64_t       mesh_component{};
-    std::vector<DbdUEVector> bone_positions;
+    DbdUEVector    bone_positions[DBD_MAX_BONES];
+    uint32_t       bone_count{};
     int            bone_map[BONE_COUNT];
     bool           bones_mapped{};
 };

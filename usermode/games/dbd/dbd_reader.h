@@ -67,6 +67,11 @@ public:
             return state;
         }
 
+        if (gworld != last_gworld_) {
+            actor_class_cache_.clear();
+            last_gworld_ = gworld;
+        }
+
         if (verbose)
             LOG_CHAIN("[1] GWorld = 0x%lX", gworld);
 
@@ -142,8 +147,27 @@ public:
             scan_objects(pid, persistent_level, state, verbose);
         else {
             state.objects = cached_objects_;
-            for (auto& obj : state.objects)
-                read_object_state(pid, obj.address, obj);
+            ++obj_update_counter_;
+            for (auto& obj : state.objects) {
+                int ti = static_cast<int>(obj.type);
+                bool do_update = false;
+                switch (obj.type) {
+                    case EDbdObjectType::Generator:
+                    case EDbdObjectType::EscapeDoor:
+                        do_update = true;
+                        break;
+                    case EDbdObjectType::Pallet:
+                    case EDbdObjectType::Hook:
+                    case EDbdObjectType::Hatch:
+                        do_update = (obj_update_counter_ % 5 == 0);
+                        break;
+                    default:
+                        do_update = (obj_update_counter_ % 30 == 0);
+                        break;
+                }
+                if (do_update)
+                    read_object_state(pid, obj.address, obj);
+            }
         }
 
         if (state.has_camera) {
@@ -178,6 +202,9 @@ private:
     int bone_info_stride_{};
     uint32_t c2w_rot_offset_{};
     std::unordered_set<uint64_t> bone_mapped_addrs_;
+    std::unordered_map<uint64_t, int> actor_class_cache_;
+    uint64_t last_gworld_{};
+    uint32_t obj_update_counter_{};
 
     std::string test_gnames_resolve(int pid, uint64_t gworld) {
         return gnames_.resolve_object_class_name(client_, pid, gworld);
@@ -210,16 +237,16 @@ private:
             p.role = role;
             if (role == EDbdPlayerRole::Role_Camper) {
                 p.type = EDbdActorType::Survivor;
-                p.name = "Survivor";
+                snprintf(p.name, sizeof(p.name), "Survivor");
             } else if (role == EDbdPlayerRole::Role_Slasher) {
                 p.type = EDbdActorType::Killer;
-                p.name = "Killer";
+                snprintf(p.name, sizeof(p.name), "Killer");
             } else {
                 p.type = EDbdActorType::Unknown;
-                p.name = "Lobby";
+                snprintf(p.name, sizeof(p.name), "Lobby");
             }
 
-            read_player_name(pid, ps, p.name);
+            read_player_name(pid, ps, p.name, sizeof(p.name));
 
             uint64_t pawn = 0;
             read_ptr(pid, ps + DBD_PAWN_PRIVATE, pawn);
@@ -249,7 +276,7 @@ private:
 
             if (verbose)
                 LOG_CHAIN("[P] %s pawn=0x%lX pos=(%.0f,%.0f,%.0f) hp=%d lv=%d p=%d local=%d",
-                          p.name.c_str(), pawn,
+                          p.name, pawn,
                           p.position.X, p.position.Y, p.position.Z,
                           p.health_states, p.level, p.prestige, is_local ? 1 : 0);
 
@@ -292,14 +319,23 @@ private:
 
             if (seen_addrs.count(actor)) continue;
 
-            std::string class_name = gnames_.resolve_object_class_name(client_, pid, actor);
-            if (class_name.empty()) continue;
-
-
-
+            auto cache_it = actor_class_cache_.find(actor);
             EDbdObjectType obj_type;
-            bool found = classify_object(class_name, obj_type);
-            if (!found) continue;
+            bool found;
+            if (cache_it != actor_class_cache_.end()) {
+                if (cache_it->second < 0) continue;
+                obj_type = static_cast<EDbdObjectType>(cache_it->second);
+                found = true;
+            } else {
+                std::string class_name = gnames_.resolve_object_class_name(client_, pid, actor);
+                if (class_name.empty()) {
+                    actor_class_cache_[actor] = -1;
+                    continue;
+                }
+                found = classify_object(class_name, obj_type);
+                actor_class_cache_[actor] = found ? static_cast<int>(obj_type) : -1;
+                if (!found) continue;
+            }
 
 
 
@@ -349,7 +385,7 @@ private:
         return false;
     }
 
-    void read_player_name(int pid, uint64_t player_state, std::string& out_name) {
+    void read_player_name(int pid, uint64_t player_state, char* out_name, size_t out_size) {
         DbdTArray name_arr{};
         if (!read_val(pid, player_state + DBD_PLAYER_NAME_PRIVATE, name_arr))
             return;
@@ -363,18 +399,20 @@ private:
         if (!client_.read_mem(pid, name_arr.Data, bytes, buf.data()))
             return;
 
-        std::string name;
-        for (uint32_t j = 0; j < bytes; j += 2) {
+        char tmp[64]{};
+        int pos = 0;
+        for (uint32_t j = 0; j < bytes && pos < 63; j += 2) {
             uint16_t ch = buf[j] | (buf[j+1] << 8);
             if (ch == 0) break;
             if (ch < 128)
-                name += static_cast<char>(ch);
+                tmp[pos++] = static_cast<char>(ch);
             else
-                name += '?';
+                tmp[pos++] = '?';
         }
+        tmp[pos] = 0;
 
-        if (!name.empty())
-            out_name = name;
+        if (pos > 0)
+            snprintf(out_name, out_size, "%s", tmp);
     }
 
     void read_object_state(int pid, uint64_t actor, DbdObjectData& obj) {
@@ -519,9 +557,15 @@ private:
         }
 
         if (bone_array_offset_ == 0) {
-            for (uint32_t off = 0x480; off <= 0x6A0; off += 0x10) {
+            constexpr uint32_t scan_start = 0x480;
+            constexpr uint32_t scan_end   = 0x6B0;
+            constexpr uint32_t scan_size  = scan_end - scan_start;
+            unsigned char scan_buf[scan_size];
+            if (!client_.read_mem(pid, mesh_comp + scan_start, scan_size, scan_buf)) return;
+
+            for (uint32_t off = 0; off <= scan_size - 0x10; off += 0x10) {
                 DbdTArray arr{};
-                if (!read_val(pid, mesh_comp + off, arr)) continue;
+                memcpy(&arr, scan_buf + off, sizeof(arr));
                 if (!DbdIsLikelyPointer(arr.Data)) continue;
                 if (arr.Count < 20 || arr.Count > 300) continue;
 
@@ -530,8 +574,8 @@ private:
                 if (!std::isfinite(test_bone.PosX) || !std::isfinite(test_bone.PosY))
                     continue;
 
-                bone_array_offset_ = off;
-                LOG_CHAIN("[BONE] Found transform array at meshComp+0x%X count=%u", off, arr.Count);
+                bone_array_offset_ = scan_start + off;
+                LOG_CHAIN("[BONE] Found transform array at meshComp+0x%X count=%u", bone_array_offset_, arr.Count);
                 break;
             }
             if (bone_array_offset_ == 0) return;
@@ -556,7 +600,7 @@ private:
             off += chunk;
         }
 
-        p.bone_positions.resize(count);
+        p.bone_count = count;
         const auto* transforms = reinterpret_cast<const DbdFTransform*>(bulk.data());
         for (uint32_t i = 0; i < count; i++) {
             double bx = transforms[i].PosX;
@@ -627,10 +671,23 @@ private:
             if (stride == 0) return;
         }
 
+        uint32_t read_count = (bone_info.Count < 200) ? bone_info.Count : 200;
+        uint32_t bulk_bytes = read_count * stride;
+        if (bulk_bytes > 4096) bulk_bytes = 4096;
+        read_count = bulk_bytes / stride;
+
+        std::vector<unsigned char> bulk_data(bulk_bytes, 0);
+        for (uint32_t off = 0; off < bulk_bytes; ) {
+            uint32_t chunk = bulk_bytes - off;
+            if (chunk > 4096) chunk = 4096;
+            if (!client_.read_mem(pid, bone_info.Data + off, chunk, &bulk_data[off])) return;
+            off += chunk;
+        }
+
         int found = 0;
-        for (uint32_t i = 0; i < bone_info.Count && i < 200; i++) {
+        for (uint32_t i = 0; i < read_count; i++) {
             uint32_t fname_idx = 0;
-            if (!read_val(pid, bone_info.Data + i * stride, fname_idx)) continue;
+            memcpy(&fname_idx, &bulk_data[i * stride], 4);
             if (fname_idx == 0) continue;
             std::string name = gnames_.resolve(client_, pid, fname_idx);
             if (name.empty()) continue;

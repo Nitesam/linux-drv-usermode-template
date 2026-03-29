@@ -95,9 +95,9 @@ public:
                 p.type == EDbdActorType::Survivor ? "Survivor" : "Killer");
             ImGui::TableNextColumn();
             if (p.is_local)
-                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s (You)", p.name.c_str());
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s (You)", p.name);
             else
-                ImGui::Text("%s", p.name.c_str());
+                ImGui::Text("%s", p.name);
             ImGui::TableNextColumn();
             if (p.prestige >= 0)
                 ImGui::Text("P%d", p.prestige);
@@ -167,8 +167,8 @@ public:
 
             ImGui::TableNextColumn(); ImGui::TextColored(dim, "Bones");
             ImGui::TableNextColumn();
-            if (!state_.players.empty() && !state_.players[0].bone_positions.empty())
-                ImGui::TextColored(ok, "%zu bones", state_.players[0].bone_positions.size());
+            if (!state_.players.empty() && state_.players[0].bone_count > 0)
+                ImGui::TextColored(ok, "%u bones", state_.players[0].bone_count);
             else
                 ImGui::TextColored(warn, "Not found");
 

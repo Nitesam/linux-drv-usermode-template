@@ -48,10 +48,11 @@ public:
     void render_widget() {
         std::lock_guard<std::mutex> lock(mtx_);
 
-        ImGui::Text("Entries: %d / %d", (int)entries_.size(), MAX_ENTRIES);
+        ImGui::Text("Entries: %d / %d", count_, MAX_ENTRIES);
         ImGui::SameLine();
         if (ImGui::Button("Clear")) {
-            entries_.clear();
+            count_ = 0;
+            head_ = 0;
         }
 
         ImGui::Separator();
@@ -63,13 +64,21 @@ public:
         render_log_inner();
     }
 
-    const std::vector<std::string>& entries() {
-        return entries_;
+    std::vector<std::string> entries_snapshot() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        std::vector<std::string> out;
+        out.reserve(count_);
+        for (int i = 0; i < count_; ++i) {
+            int idx = (count_ < MAX_ENTRIES) ? i : (head_ + i) % MAX_ENTRIES;
+            out.push_back(ring_[idx]);
+        }
+        return out;
     }
 
     void clear() {
         std::lock_guard<std::mutex> lock(mtx_);
-        entries_.clear();
+        count_ = 0;
+        head_ = 0;
     }
 
     void shutdown() {
@@ -82,33 +91,40 @@ public:
 private:
     static constexpr int MAX_ENTRIES = 2000;
 
-    Logger() : ready_(false), auto_scroll_(true) {
+    Logger() : ready_(false), auto_scroll_(true), head_(0), count_(0) {
         memset(&start_time_, 0, sizeof(start_time_));
-        entries_.reserve(512);
+        ring_.resize(MAX_ENTRIES);
     }
     ~Logger() { shutdown(); }
 
     void push(const std::string& line) {
-        if ((int)entries_.size() >= MAX_ENTRIES)
-            entries_.erase(entries_.begin());
-        entries_.push_back(line);
+        ring_[head_] = line;
+        head_ = (head_ + 1) % MAX_ENTRIES;
+        if (count_ < MAX_ENTRIES) count_++;
     }
 
     bool ready_;
     bool auto_scroll_;
+    int head_;
+    int count_;
     struct timespec start_time_;
     std::mutex mtx_;
-    std::vector<std::string> entries_;
+    std::vector<std::string> ring_;
+
+    inline int entry_index(int i) const {
+        if (count_ < MAX_ENTRIES) return i;
+        return (head_ + i) % MAX_ENTRIES;
+    }
 
     void render_log_inner() {
         ImGui::BeginChild("##log_scroll", ImVec2(0, 0), false,
                           ImGuiWindowFlags_HorizontalScrollbar);
 
         ImGuiListClipper clipper;
-        clipper.Begin((int)entries_.size());
+        clipper.Begin(count_);
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                const auto& e = entries_[i];
+                const auto& e = ring_[entry_index(i)];
                 ImVec4 col = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
                 if (e.find("[ERROR]") != std::string::npos)
                     col = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);

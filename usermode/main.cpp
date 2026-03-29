@@ -8,6 +8,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <shared_mutex>
 #include <X11/keysym.h>
 #include <vector>
 #include <sys/prctl.h>
@@ -40,11 +41,17 @@ static int                g_target_pid   = -1;
 static uint64_t           g_base_address = 0;
 static std::string        g_status_msg   = "Ready";
 static std::atomic<bool>  g_running{true};
-static std::mutex         g_game_mutex;
 static bool               g_ui_visible   = false;
 static bool               g_passthrough  = false;
 static bool               g_ins_was_down = false;
 static bool               g_show_debug   = false;
+static int                g_deferred_passthrough = -1;
+static std::chrono::steady_clock::time_point g_last_toggle_time{};
+static constexpr double   kToggleCooldownSec = 0.2;
+static bool               g_settings_dirty = false;
+
+static std::shared_ptr<GameModule> g_shared_state;
+static std::shared_mutex           g_state_rwlock;
 
 static SettingsStore       g_settings_store;
 static std::string         g_settings_snapshot;
@@ -62,8 +69,19 @@ static GLFWwindow *g_glfw_window = nullptr;
 static void set_clickthrough(bool enable)
 {
     if (!g_glfw_window || g_passthrough == enable) return;
+
+    Window prev_focus = 0;
+    int revert_to = 0;
+    if (!enable && g_x11_dpy)
+        XGetInputFocus(g_x11_dpy, &prev_focus, &revert_to);
+
     g_passthrough = enable;
     glfwSetWindowAttrib(g_glfw_window, GLFW_MOUSE_PASSTHROUGH, enable ? GLFW_TRUE : GLFW_FALSE);
+
+    if (!enable && g_x11_dpy && prev_focus && prev_focus != g_x11_win) {
+        XSetInputFocus(g_x11_dpy, prev_focus, revert_to, CurrentTime);
+        XFlush(g_x11_dpy);
+    }
 }
 
 static void poll_global_hotkey()
@@ -74,13 +92,17 @@ static void poll_global_hotkey()
     KeyCode ins = XKeysymToKeycode(g_x11_dpy, XK_Insert);
     bool is_down = (keys[ins / 8] & (1 << (ins % 8))) != 0;
     if (is_down && !g_ins_was_down) {
-        g_ui_visible = !g_ui_visible;
-        set_clickthrough(!g_ui_visible);
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - g_last_toggle_time).count();
+        if (dt >= kToggleCooldownSec) {
+            g_last_toggle_time = now;
+            g_ui_visible = !g_ui_visible;
+            g_deferred_passthrough = g_ui_visible ? 0 : 1;
+        }
     }
     g_ins_was_down = is_down;
 }
 
-static std::unique_ptr<GameModule> g_game;
 
 static int try_find_pid(MemClient& client, GameModule* game)
 {
@@ -106,12 +128,11 @@ static void reader_thread_func()
         local_game->update(g_client, g_target_pid, g_base_address);
 
         {
-            std::lock_guard<std::mutex> lock(g_game_mutex);
-            g_game.swap(local_game);
+            std::unique_lock<std::shared_mutex> wlock(g_state_rwlock);
+            g_shared_state = std::move(local_game);
         }
 
-        if (!local_game)
-            local_game = create_game();
+        local_game = create_game();
     }
 }
 
@@ -181,14 +202,14 @@ int main(int argc, char **argv)
 
     Logger::instance().init();
 
-    g_game = create_game();
-    LOG_INFO("Starting application (PID %d) — Game: %s", getpid(), g_game->game_name());
+    auto g_init_game = create_game();
+    LOG_INFO("Starting application (PID %d) — Game: %s", getpid(), g_init_game->game_name());
 
     g_settings_store.init();
     {
         std::string saved = g_settings_store.load();
         if (!saved.empty()) {
-            g_game->load_settings(saved);
+            g_init_game->load_settings(saved);
             g_settings_snapshot = saved;
             LOG_INFO("Settings loaded from %s", g_settings_store.path.c_str());
         }
@@ -256,6 +277,12 @@ int main(int argc, char **argv)
                 XSetClassHint(g_x11_dpy, g_x11_win, ch);
                 XFree(ch);
 
+                XWMHints *wmh = XAllocWMHints();
+                wmh->flags = InputHint;
+                wmh->input = False;
+                XSetWMHints(g_x11_dpy, g_x11_win, wmh);
+                XFree(wmh);
+
                 Atom wm_type = XInternAtom(g_x11_dpy, "_NET_WM_WINDOW_TYPE", False);
                 Atom type_notif = XInternAtom(g_x11_dpy, "_NET_WM_WINDOW_TYPE_NOTIFICATION", False);
                 XChangeProperty(g_x11_dpy, g_x11_win, wm_type, XA_ATOM, 32,
@@ -297,9 +324,9 @@ int main(int argc, char **argv)
             g_status_msg += " | PID hidden";
     }
 
-    g_target_pid = try_find_pid(g_client, g_game.get());
+    g_target_pid = try_find_pid(g_client, g_init_game.get());
     if (g_target_pid > 0) {
-        g_base_address = g_client.get_base_address(g_target_pid, g_game->module_filter());
+        g_base_address = g_client.get_base_address(g_target_pid, g_init_game->module_filter());
         g_status_msg += " | PID: " + std::to_string(g_target_pid);
         if (g_base_address > 0) {
             char buf[32]; snprintf(buf, sizeof(buf), "0x%lX", g_base_address);
@@ -308,8 +335,10 @@ int main(int argc, char **argv)
             g_status_msg += " | Base: NOT FOUND";
         }
     } else {
-        g_status_msg += std::string(" | ") + g_game->game_name() + " not found";
+        g_status_msg += std::string(" | ") + g_init_game->game_name() + " not found";
     }
+
+    g_shared_state = std::move(g_init_game);
 
     std::thread reader_thread(reader_thread_func);
 
@@ -324,14 +353,19 @@ int main(int argc, char **argv)
         glfwPollEvents();
         poll_global_hotkey();
 
+        if (g_deferred_passthrough >= 0) {
+            set_clickthrough(g_deferred_passthrough != 0);
+            g_deferred_passthrough = -1;
+        }
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        std::unique_ptr<GameModule> render_game;
+        std::shared_ptr<GameModule> render_game;
         {
-            std::lock_guard<std::mutex> lock(g_game_mutex);
-            render_game.swap(g_game);
+            std::shared_lock<std::shared_mutex> rlock(g_state_rwlock);
+            render_game = g_shared_state;
         }
         if (!render_game)
             render_game = create_game();
@@ -352,10 +386,13 @@ int main(int argc, char **argv)
         fg->AddText(ImVec2(g_screen_width - 80.0f, 5.0f), IM_COL32(180, 180, 180, 180), fps_buf);
 
         if (g_ui_visible) {
-            ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(700, 500), ImGuiCond_FirstUseEver);
+            ImVec2 win_size(700, 500);
+            ImGui::SetNextWindowPos(ImVec2((g_screen_width - win_size.x) * 0.5f,
+                                           (g_screen_height - win_size.y) * 0.5f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(win_size, ImGuiCond_Always);
             ImGui::Begin("##MainPanel", &g_ui_visible,
-                         ImGuiWindowFlags_NoCollapse);
+                         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
+                         ImGuiWindowFlags_NoResize);
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f, 0.8f, 0.4f, 1.0f));
             ImGui::Text(u8"\u2588\u2588  %s", render_game->game_name());
@@ -392,6 +429,7 @@ int main(int argc, char **argv)
                     ImGui::BeginChild("##players_content", ImVec2(0, content_height - 40), true);
 
                     render_game->render_controls();
+                    g_settings_dirty = true;
                     ImGui::Separator();
 
                     std::string st = render_game->status_text();
@@ -406,6 +444,7 @@ int main(int argc, char **argv)
                 if (ImGui::BeginTabItem("ESP")) {
                     ImGui::BeginChild("##esp_content", ImVec2(0, content_height - 40), true);
                     render_game->render_esp_controls();
+                    g_settings_dirty = true;
                     ImGui::EndChild();
                     ImGui::EndTabItem();
                 }
@@ -421,7 +460,7 @@ int main(int argc, char **argv)
                     ImGui::SameLine();
                     if (ImGui::SmallButton("Copy Log")) {
                         std::string all;
-                        auto& entries = Logger::instance().entries();
+                        auto entries = Logger::instance().entries_snapshot();
                         for (auto& e : entries) { all += e; all += '\n'; }
                         if (!all.empty())
                             ImGui::SetClipboardText(all.c_str());
@@ -506,21 +545,16 @@ int main(int argc, char **argv)
             std::this_thread::sleep_for(std::chrono::microseconds(static_cast<long long>(sleep_us)));
         }
 
-        {
+        if (g_settings_dirty) {
+            g_settings_dirty = false;
             std::string cur = render_game->save_settings();
             if (cur != g_settings_snapshot) {
                 g_settings_snapshot = cur;
                 g_settings_store.mark_dirty();
             }
-            if (g_settings_store.should_flush()) {
-                g_settings_store.save(g_settings_snapshot.c_str());
-            }
         }
-
-        {
-            std::lock_guard<std::mutex> lock(g_game_mutex);
-            if (!g_game)
-                g_game.swap(render_game);
+        if (g_settings_store.should_flush()) {
+            g_settings_store.save(g_settings_snapshot.c_str());
         }
     }
 
