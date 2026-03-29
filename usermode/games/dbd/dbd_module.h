@@ -21,7 +21,8 @@ public:
     void update(MemClient& client, int pid, uint64_t base) override {
         if (!reader_)
             reader_ = std::make_unique<DbdReader>(client);
-        state_ = reader_->update(pid, base);
+        DbdAuraConfig aura_cfg = esp_.settings.get_aura_config();
+        state_ = reader_->update(pid, base, &aura_cfg);
     }
 
     bool is_valid()     override { return state_.valid; }

@@ -69,6 +69,13 @@
 #define DBD_BONE_INFO_ARRAY              0x02E8
 #define DBD_COMPONENT_TO_WORLD_BONE      0x01E0
 
+#define DBD_ACTOR_COMPONENTS             0x02C0
+
+#define DBD_AURA_COLOR_R                 0x364
+#define DBD_AURA_COLOR_G                 0x368
+#define DBD_AURA_COLOR_B                 0x36C
+#define DBD_AURA_COLOR_A                 0x370
+
 enum class EDbdPlayerRole : uint8_t {
     Role_None     = 0,
     Role_Slasher  = 1,
@@ -186,6 +193,7 @@ struct DbdPlayerData {
     uint32_t       bone_count{};
     int            bone_map[BONE_COUNT];
     bool           bones_mapped{};
+    uint64_t       aura_component{};
 };
 
 struct DbdObjectData {
@@ -203,6 +211,35 @@ struct DbdObjectData {
     bool            hook_basement{};
     bool            chest_opened{};
     bool            escape_activated{};
+    uint64_t        aura_component{};
+};
+
+struct DbdAuraColor {
+    float r{}, g{}, b{}, a{1.0f};
+};
+
+struct DbdAuraConfig {
+    bool enabled = false;
+    bool survivor_aura = true;
+    bool killer_aura = true;
+    DbdAuraColor survivor_color{0.0f, 1.0f, 0.0f, 0.5f};
+    DbdAuraColor killer_color{1.0f, 0.0f, 0.0f, 0.75f};
+    bool obj_aura[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
+        true, true, true, true, true, false, true, true, true, true, false
+    };
+    DbdAuraColor obj_color[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
+        {0.13f, 0.83f, 0.69f, 0.5f},
+        {0.09f, 0.12f, 1.0f, 0.25f},
+        {0.86f, 0.86f, 0.0f, 0.35f},
+        {0.31f, 0.50f, 0.88f, 0.5f},
+        {0.58f, 0.0f, 0.83f, 0.5f},
+        {0.5f, 0.5f, 0.5f, 0.5f},
+        {0.85f, 0.65f, 0.13f, 0.5f},
+        {0.95f, 0.50f, 0.0f, 0.35f},
+        {0.86f, 0.08f, 0.24f, 0.5f},
+        {0.2f, 0.8f, 0.2f, 0.5f},
+        {0.82f, 0.41f, 0.12f, 0.5f},
+    };
 };
 
 inline bool DbdIsFiniteVec(const DbdUEVector& v) {

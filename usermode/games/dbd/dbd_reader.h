@@ -45,7 +45,7 @@ public:
         return true;
     }
 
-    DbdWorldState update(int pid, uint64_t base_address) {
+    DbdWorldState update(int pid, uint64_t base_address, const DbdAuraConfig* aura_cfg = nullptr) {
         DbdWorldState state{};
         state.base_address = base_address;
         ++cycle_;
@@ -69,6 +69,7 @@ public:
 
         if (gworld != last_gworld_) {
             actor_class_cache_.clear();
+            aura_cache_.clear();
             last_gworld_ = gworld;
         }
 
@@ -170,6 +171,31 @@ public:
             }
         }
 
+        if (aura_cfg && aura_cfg->enabled && gnames_resolved_) {
+            for (auto& p : state.players) {
+                if (!p.valid || p.is_local || p.address == 0) continue;
+                bool want = (p.type == EDbdActorType::Survivor && aura_cfg->survivor_aura)
+                         || (p.type == EDbdActorType::Killer && aura_cfg->killer_aura);
+                if (!want) continue;
+                uint64_t ac = find_aura_component(pid, p.address);
+                p.aura_component = ac;
+                if (ac) {
+                    const auto& col = (p.type == EDbdActorType::Survivor)
+                        ? aura_cfg->survivor_color : aura_cfg->killer_color;
+                    write_aura(pid, ac, col);
+                }
+            }
+            for (auto& obj : state.objects) {
+                int ti = static_cast<int>(obj.type);
+                if (ti < 0 || ti >= static_cast<int>(EDbdObjectType::OBJ_COUNT)) continue;
+                if (!aura_cfg->obj_aura[ti]) continue;
+                uint64_t ac = find_aura_component(pid, obj.address);
+                obj.aura_component = ac;
+                if (ac)
+                    write_aura(pid, ac, aura_cfg->obj_color[ti]);
+            }
+        }
+
         if (state.has_camera) {
             for (auto& obj : state.objects) {
                 obj.distance = DbdVectorDistance(obj.position, state.camera.Location) / 100.0f;
@@ -205,6 +231,98 @@ private:
     std::unordered_map<uint64_t, int> actor_class_cache_;
     uint64_t last_gworld_{};
     uint32_t obj_update_counter_{};
+
+    struct AuraCacheEntry {
+        uint64_t aura_addr{};
+        uint64_t resolve_cycle{};
+    };
+    std::unordered_map<uint64_t, AuraCacheEntry> aura_cache_;
+    static constexpr uint64_t AURA_CACHE_TTL = 30;
+
+    uint64_t find_aura_component(int pid, uint64_t actor_addr) {
+        auto it = aura_cache_.find(actor_addr);
+        if (it != aura_cache_.end()) {
+            if ((cycle_ - it->second.resolve_cycle) < AURA_CACHE_TTL) {
+                if (it->second.aura_addr && validate_aura_ptr(pid, it->second.aura_addr))
+                    return it->second.aura_addr;
+                if (it->second.aura_addr == 0)
+                    return 0;
+            }
+            aura_cache_.erase(it);
+        }
+
+        DbdTArray comp_array{};
+        if (!read_val(pid, actor_addr + DBD_ACTOR_COMPONENTS, comp_array)) {
+            aura_cache_[actor_addr] = {0, cycle_};
+            return 0;
+        }
+        if (!DbdIsLikelyPointer(comp_array.Data) || comp_array.Count == 0 || comp_array.Count > 256) {
+            aura_cache_[actor_addr] = {0, cycle_};
+            return 0;
+        }
+
+        for (uint32_t i = 0; i < comp_array.Count; i++) {
+            uint64_t comp = 0;
+            if (!read_ptr(pid, comp_array.Data + i * 8, comp)) continue;
+            if (!DbdIsLikelyPointer(comp)) continue;
+
+            std::string class_name = gnames_.resolve_object_class_name(client_, pid, comp);
+            if (class_name.empty()) continue;
+
+            if (class_name.find("DBDAura") != std::string::npos ||
+                class_name.find("AuraComponent") != std::string::npos) {
+                aura_cache_[actor_addr] = {comp, cycle_};
+                static int log_count = 0;
+                if (log_count < 5) {
+                    LOG_CHAIN("[AURA] Found at 0x%lX for actor 0x%lX (class=%s)",
+                              comp, actor_addr, class_name.c_str());
+                    log_count++;
+                }
+                return comp;
+            }
+        }
+
+        aura_cache_[actor_addr] = {0, cycle_};
+        return 0;
+    }
+
+    bool validate_aura_ptr(int pid, uint64_t aura_addr) {
+        if (!DbdIsLikelyPointer(aura_addr)) return false;
+
+        uint64_t vtable = 0;
+        if (!read_ptr(pid, aura_addr, vtable)) return false;
+        if (!DbdIsLikelyPointer(vtable)) return false;
+
+        uint64_t class_ptr = 0;
+        if (!read_ptr(pid, aura_addr + 0x10, class_ptr)) return false;
+        if (!DbdIsLikelyPointer(class_ptr)) return false;
+
+        float test_r = 0;
+        if (!read_val(pid, aura_addr + DBD_AURA_COLOR_R, test_r)) return false;
+        if (test_r < -1.0f || test_r > 10.0f) return false;
+
+        return true;
+    }
+
+    void write_aura(int pid, uint64_t aura_addr, const DbdAuraColor& color) {
+        if (!validate_aura_ptr(pid, aura_addr)) {
+            for (auto it = aura_cache_.begin(); it != aura_cache_.end(); ++it) {
+                if (it->second.aura_addr == aura_addr) {
+                    aura_cache_.erase(it);
+                    break;
+                }
+            }
+            return;
+        }
+        client_.write_mem(pid, aura_addr + DBD_AURA_COLOR_R,
+                          sizeof(float), reinterpret_cast<const unsigned char*>(&color.r));
+        client_.write_mem(pid, aura_addr + DBD_AURA_COLOR_G,
+                          sizeof(float), reinterpret_cast<const unsigned char*>(&color.g));
+        client_.write_mem(pid, aura_addr + DBD_AURA_COLOR_B,
+                          sizeof(float), reinterpret_cast<const unsigned char*>(&color.b));
+        client_.write_mem(pid, aura_addr + DBD_AURA_COLOR_A,
+                          sizeof(float), reinterpret_cast<const unsigned char*>(&color.a));
+    }
 
     std::string test_gnames_resolve(int pid, uint64_t gworld) {
         return gnames_.resolve_object_class_name(client_, pid, gworld);

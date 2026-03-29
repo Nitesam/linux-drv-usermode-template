@@ -119,8 +119,44 @@ struct DbdEspSettings {
     bool  show_debug_overlay = false;
     float esp_y_offset = 0.0f;
 
+    bool  aura_enabled = false;
+    bool  aura_survivors = true;
+    bool  aura_killer = true;
+    float aura_surv_color[4] = {0.0f, 1.0f, 0.0f, 0.5f};
+    float aura_killer_color[4] = {1.0f, 0.0f, 0.0f, 0.75f};
+    bool  aura_obj[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
+        true, true, true, true, true, false, true, true, true, true, false
+    };
+    float aura_obj_color[static_cast<int>(EDbdObjectType::OBJ_COUNT)][4] = {
+        {0.13f, 0.83f, 0.69f, 0.5f},
+        {0.09f, 0.12f, 1.0f, 0.25f},
+        {0.86f, 0.86f, 0.0f, 0.35f},
+        {0.31f, 0.50f, 0.88f, 0.5f},
+        {0.58f, 0.0f, 0.83f, 0.5f},
+        {0.5f, 0.5f, 0.5f, 0.5f},
+        {0.85f, 0.65f, 0.13f, 0.5f},
+        {0.95f, 0.50f, 0.0f, 0.35f},
+        {0.86f, 0.08f, 0.24f, 0.5f},
+        {0.2f, 0.8f, 0.2f, 0.5f},
+        {0.82f, 0.41f, 0.12f, 0.5f},
+    };
+
+    DbdAuraConfig get_aura_config() const {
+        DbdAuraConfig cfg;
+        cfg.enabled = aura_enabled;
+        cfg.survivor_aura = aura_survivors;
+        cfg.killer_aura = aura_killer;
+        cfg.survivor_color = {aura_surv_color[0], aura_surv_color[1], aura_surv_color[2], aura_surv_color[3]};
+        cfg.killer_color = {aura_killer_color[0], aura_killer_color[1], aura_killer_color[2], aura_killer_color[3]};
+        for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
+            cfg.obj_aura[i] = aura_obj[i];
+            cfg.obj_color[i] = {aura_obj_color[i][0], aura_obj_color[i][1], aura_obj_color[i][2], aura_obj_color[i][3]};
+        }
+        return cfg;
+    }
+
     std::string to_json() const {
-        char buf[2048];
+        char buf[8192];
         int n = snprintf(buf, sizeof(buf),
             "{\n"
             "  \"show_name\": %s,\n"
@@ -138,6 +174,18 @@ struct DbdEspSettings {
             show_objects ? "true" : "false",
             show_debug_overlay ? "true" : "false");
         n += snprintf(buf + n, sizeof(buf) - n, "  \"esp_y_offset\": %.1f,\n", esp_y_offset);
+        n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_enabled\": %s,\n", aura_enabled ? "true" : "false");
+        n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_survivors\": %s,\n", aura_survivors ? "true" : "false");
+        n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_killer\": %s,\n", aura_killer ? "true" : "false");
+        n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_surv_color\": [%.3f,%.3f,%.3f,%.3f],\n",
+                     aura_surv_color[0], aura_surv_color[1], aura_surv_color[2], aura_surv_color[3]);
+        n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_killer_color\": [%.3f,%.3f,%.3f,%.3f],\n",
+                     aura_killer_color[0], aura_killer_color[1], aura_killer_color[2], aura_killer_color[3]);
+        for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
+            n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_obj_%d\": %s,\n", i, aura_obj[i] ? "true" : "false");
+            n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_obj_color_%d\": [%.3f,%.3f,%.3f,%.3f],\n",
+                         i, aura_obj_color[i][0], aura_obj_color[i][1], aura_obj_color[i][2], aura_obj_color[i][3]);
+        }
         for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
             char key[64];
             snprintf(key, sizeof(key), "  \"obj_show_%d\": %s,\n", i, obj_show[i] ? "true" : "false");
@@ -175,6 +223,32 @@ struct DbdEspSettings {
         show_objects = gb("show_objects", show_objects);
         show_debug_overlay = gb("show_debug_overlay", show_debug_overlay);
         esp_y_offset = gf("esp_y_offset", esp_y_offset);
+        aura_enabled = gb("aura_enabled", aura_enabled);
+        aura_survivors = gb("aura_survivors", aura_survivors);
+        aura_killer = gb("aura_killer", aura_killer);
+        auto ga4 = [&](const char* k, float* arr) {
+            auto p = s.find(std::string("\"") + k + "\"");
+            if (p == std::string::npos) return;
+            p = s.find('[', p); if (p == std::string::npos) return;
+            int ci = 0;
+            size_t pos = p + 1;
+            while (ci < 4 && pos < s.size()) {
+                arr[ci++] = static_cast<float>(atof(s.c_str() + pos));
+                auto next = s.find(',', pos);
+                auto end = s.find(']', pos);
+                if (next == std::string::npos || (end != std::string::npos && end < next)) break;
+                pos = next + 1;
+            }
+        };
+        ga4("aura_surv_color", aura_surv_color);
+        ga4("aura_killer_color", aura_killer_color);
+        for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
+            char key[32];
+            snprintf(key, sizeof(key), "aura_obj_%d", i);
+            aura_obj[i] = gb(key, aura_obj[i]);
+            snprintf(key, sizeof(key), "aura_obj_color_%d", i);
+            ga4(key, aura_obj_color[i]);
+        }
         for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
             char key[32];
             snprintf(key, sizeof(key), "obj_show_%d", i);
@@ -528,6 +602,43 @@ public:
 
         ImGui::Separator();
         ImGui::Checkbox("Debug On Screen", &settings.show_debug_overlay);
+
+        ImGui::Separator();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.0f, 1.0f));
+        ImGui::Checkbox("Aura [Memory Write]", &settings.aura_enabled);
+        ImGui::PopStyleColor();
+        if (settings.aura_enabled) {
+            ImGui::Indent(10.0f);
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 0.8f),
+                "Writes to game memory");
+
+            ImGui::SeparatorText("Players");
+            ImGui::Checkbox("Survivor Aura", &settings.aura_survivors);
+            if (settings.aura_survivors) {
+                ImGui::SameLine();
+                ImGui::ColorEdit4("##surv_aura_col", settings.aura_surv_color,
+                    ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+            }
+            ImGui::Checkbox("Killer Aura", &settings.aura_killer);
+            if (settings.aura_killer) {
+                ImGui::SameLine();
+                ImGui::ColorEdit4("##kill_aura_col", settings.aura_killer_color,
+                    ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+            }
+
+            ImGui::SeparatorText("Objects");
+            for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); ++i) {
+                char cbid[32];
+                snprintf(cbid, sizeof(cbid), "##auraobj%d", i);
+                ImGui::Checkbox(DbdObjectTypeName(static_cast<EDbdObjectType>(i)), &settings.aura_obj[i]);
+                if (settings.aura_obj[i]) {
+                    ImGui::SameLine();
+                    ImGui::ColorEdit4(cbid, settings.aura_obj_color[i],
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                }
+            }
+            ImGui::Unindent(10.0f);
+        }
     }
 };
 
