@@ -628,9 +628,10 @@ public:
 
             ImGui::SeparatorText("Objects");
             for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); ++i) {
-                char cbid[32];
+                char cbid[32], label[64];
                 snprintf(cbid, sizeof(cbid), "##auraobj%d", i);
-                ImGui::Checkbox(DbdObjectTypeName(static_cast<EDbdObjectType>(i)), &settings.aura_obj[i]);
+                snprintf(label, sizeof(label), "%s##aura_%d", DbdObjectTypeName(static_cast<EDbdObjectType>(i)), i);
+                ImGui::Checkbox(label, &settings.aura_obj[i]);
                 if (settings.aura_obj[i]) {
                     ImGui::SameLine();
                     ImGui::ColorEdit4(cbid, settings.aura_obj_color[i],

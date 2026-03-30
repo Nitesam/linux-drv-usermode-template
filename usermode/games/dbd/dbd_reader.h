@@ -189,6 +189,8 @@ public:
                 int ti = static_cast<int>(obj.type);
                 if (ti < 0 || ti >= static_cast<int>(EDbdObjectType::OBJ_COUNT)) continue;
                 if (!aura_cfg->obj_aura[ti]) continue;
+                if (obj.type == EDbdObjectType::Pallet && obj.pallet_state >= 3) continue;
+                if (obj.type == EDbdObjectType::Chest && obj.chest_opened) continue;
                 uint64_t ac = find_aura_component(pid, obj.address);
                 obj.aura_component = ac;
                 if (ac)
