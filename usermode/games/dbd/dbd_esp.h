@@ -410,6 +410,8 @@ public:
                     continue;
                 if (!settings.obj_show[ti])
                     continue;
+                if (obj.type == EDbdObjectType::Pallet && obj.pallet_state >= 3)
+                    continue;
                 if (obj.distance > settings.obj_dist[ti] && obj.distance > 0)
                     continue;
                 if (!dbd_w2s::IsInFront(obj.position, axes))
