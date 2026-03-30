@@ -70,6 +70,7 @@ public:
         if (gworld != last_gworld_) {
             actor_class_cache_.clear();
             aura_cache_.clear();
+            player_cache_.clear();
             last_gworld_ = gworld;
         }
 
@@ -233,6 +234,21 @@ private:
     std::unordered_map<uint64_t, int> actor_class_cache_;
     uint64_t last_gworld_{};
     uint32_t obj_update_counter_{};
+    std::vector<unsigned char> bone_bulk_buf_;
+    std::vector<uint64_t> actor_ptrs_buf_;
+
+    struct PlayerEnrichCache {
+        char character_name[32]{};
+        char perk_names[DBD_MAX_PERKS][48]{};
+        int32_t perk_ids[DBD_MAX_PERKS]{};
+        int32_t perk_levels[DBD_MAX_PERKS]{};
+        char player_name[64]{};
+        bool perks_valid{};
+        int32_t character_index{-1};
+        uint64_t resolve_cycle{};
+    };
+    std::unordered_map<uint64_t, PlayerEnrichCache> player_cache_;
+    static constexpr uint64_t PLAYER_CACHE_TTL = 120;
 
     struct AuraCacheEntry {
         uint64_t aura_addr{};
@@ -316,14 +332,9 @@ private:
             }
             return;
         }
+        float rgba[4] = {color.r, color.g, color.b, color.a};
         client_.write_mem(pid, aura_addr + DBD_AURA_COLOR_R,
-                          sizeof(float), reinterpret_cast<const unsigned char*>(&color.r));
-        client_.write_mem(pid, aura_addr + DBD_AURA_COLOR_G,
-                          sizeof(float), reinterpret_cast<const unsigned char*>(&color.g));
-        client_.write_mem(pid, aura_addr + DBD_AURA_COLOR_B,
-                          sizeof(float), reinterpret_cast<const unsigned char*>(&color.b));
-        client_.write_mem(pid, aura_addr + DBD_AURA_COLOR_A,
-                          sizeof(float), reinterpret_cast<const unsigned char*>(&color.a));
+                          sizeof(rgba), reinterpret_cast<const unsigned char*>(rgba));
     }
 
     std::string test_gnames_resolve(int pid, uint64_t gworld) {
@@ -374,7 +385,7 @@ private:
             bool is_local = (pawn != 0 && pawn == local_pawn);
             p.is_local = is_local;
 
-            if (pawn != 0 && !is_local) {
+            if (pawn != 0) {
                 p.address = pawn;
                 uint64_t root = 0;
                 DbdUEVector pos{};
@@ -383,11 +394,18 @@ private:
 
                 if (DbdIsFiniteVec(pos) && !(pos.X == 0.0 && pos.Y == 0.0 && pos.Z == 0.0)) {
                     p.position = pos;
-                    if (state.has_camera)
+                    if (state.has_camera && !is_local)
                         p.distance = DbdVectorDistance(pos, state.camera.Location) / 100.0f;
                 }
 
-                read_player_enrichment(pid, ps, pawn, p);
+                if (is_local && state.has_camera && p.position.X == 0.0 && p.position.Y == 0.0)
+                    p.position = state.camera.Location;
+
+                if (is_local) {
+                    read_character_and_perks(pid, ps, pawn, p);
+                } else {
+                    read_player_enrichment(pid, ps, pawn, p);
+                }
             } else {
                 read_player_enrichment_lobby(pid, ps, p);
             }
@@ -417,18 +435,19 @@ private:
             return;
 
         uint32_t ptrs_to_read = (actor_count < 3000) ? actor_count : 3000;
-        std::vector<uint64_t> actor_ptrs(ptrs_to_read, 0);
+        actor_ptrs_buf_.resize(ptrs_to_read);
+        memset(actor_ptrs_buf_.data(), 0, ptrs_to_read * 8);
         {
-            std::vector<unsigned char> bulk(ptrs_to_read * 8, 0);
+            auto* raw = reinterpret_cast<unsigned char*>(actor_ptrs_buf_.data());
             uint32_t total_bytes = ptrs_to_read * 8;
             for (uint32_t off = 0; off < total_bytes; ) {
                 uint32_t chunk = total_bytes - off;
                 if (chunk > 4096) chunk = 4096;
-                if (!client_.read_mem(pid, actor_array + off, chunk, &bulk[off])) break;
+                if (!client_.read_mem(pid, actor_array + off, chunk, raw + off)) break;
                 off += chunk;
             }
-            memcpy(actor_ptrs.data(), bulk.data(), ptrs_to_read * 8);
         }
+        auto& actor_ptrs = actor_ptrs_buf_;
 
         std::unordered_set<uint64_t> seen_addrs;
         int name_log_count = 0;
@@ -506,6 +525,12 @@ private:
     }
 
     void read_player_name(int pid, uint64_t player_state, char* out_name, size_t out_size) {
+        auto pc_it = player_cache_.find(player_state);
+        if (pc_it != player_cache_.end() && pc_it->second.player_name[0]) {
+            snprintf(out_name, out_size, "%s", pc_it->second.player_name);
+            return;
+        }
+
         DbdTArray name_arr{};
         if (!read_val(pid, player_state + DBD_PLAYER_NAME_PRIVATE, name_arr))
             return;
@@ -515,8 +540,8 @@ private:
         uint32_t bytes = name_arr.Count * 2;
         if (bytes > 256) bytes = 256;
 
-        std::vector<unsigned char> buf(bytes, 0);
-        if (!client_.read_mem(pid, name_arr.Data, bytes, buf.data()))
+        unsigned char buf[256]{};
+        if (!client_.read_mem(pid, name_arr.Data, bytes, buf))
             return;
 
         char tmp[64]{};
@@ -531,8 +556,11 @@ private:
         }
         tmp[pos] = 0;
 
-        if (pos > 0)
+        if (pos > 0) {
             snprintf(out_name, out_size, "%s", tmp);
+            player_cache_[player_state].resolve_cycle = cycle_;
+            snprintf(player_cache_[player_state].player_name, 64, "%s", tmp);
+        }
     }
 
     void read_object_state(int pid, uint64_t actor, DbdObjectData& obj) {
@@ -595,12 +623,109 @@ private:
         }
     }
 
-    void read_player_enrichment(int pid, uint64_t ps, uint64_t pawn, DbdPlayerData& p) {
+    void read_character_and_perks(int pid, uint64_t ps, uint64_t pawn, DbdPlayerData& p) {
         int32_t level = -1, prestige = -1;
         read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_CHAR_LEVEL, level);
         read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_PRESTIGE, prestige);
         if (level >= 0 && level <= 100) p.level = level;
         if (prestige >= 0 && prestige <= 100) p.prestige = prestige;
+
+        auto pc_it = player_cache_.find(ps);
+        if (pc_it != player_cache_.end() && (cycle_ - pc_it->second.resolve_cycle) < PLAYER_CACHE_TTL) {
+            auto& c = pc_it->second;
+            if (c.character_name[0])
+                snprintf(p.character_name, sizeof(p.character_name), "%s", c.character_name);
+            p.character_index = c.character_index;
+            memcpy(p.perk_ids, c.perk_ids, sizeof(p.perk_ids));
+            memcpy(p.perk_levels, c.perk_levels, sizeof(p.perk_levels));
+            memcpy(p.perk_names, c.perk_names, sizeof(p.perk_names));
+            p.perks_valid = c.perks_valid;
+            return;
+        }
+
+        if (pawn != 0 && gnames_resolved_) {
+            std::string cls = gnames_.resolve_object_class_name(client_, pid, pawn);
+            if (!cls.empty()) {
+                const char* mapped = DbdMapClassToCharacter(cls);
+                if (mapped) {
+                    snprintf(p.character_name, sizeof(p.character_name), "%s", mapped);
+                } else {
+                    size_t bp = cls.find("BP_");
+                    size_t ce = cls.find("_Character");
+                    if (bp != std::string::npos && ce != std::string::npos && ce > bp + 3) {
+                        std::string sub = cls.substr(bp + 3, ce - bp - 3);
+                        snprintf(p.character_name, sizeof(p.character_name), "%s", sub.c_str());
+                    }
+                }
+                static int cls_log = 0;
+                if (cls_log < 10) {
+                    LOG_CHAIN("[CHAR] pawn=0x%lX class='%s' -> '%s'",
+                              pawn, cls.c_str(), p.character_name[0] ? p.character_name : "?");
+                    cls_log++;
+                }
+            }
+        }
+
+        if (p.character_name[0] == 0) {
+            int32_t surv_idx = -1, kill_idx = -1;
+            read_val(pid, ps + DBD_SELECTED_SURVIVOR_INDEX, surv_idx);
+            read_val(pid, ps + DBD_SELECTED_KILLER_INDEX, kill_idx);
+
+            if (p.type == EDbdActorType::Survivor && surv_idx >= 0 && surv_idx < DBD_SURVIVOR_NAME_COUNT) {
+                p.character_index = surv_idx;
+                snprintf(p.character_name, sizeof(p.character_name), "%s", DbdSurvivorNames[surv_idx]);
+            } else if (p.type == EDbdActorType::Killer && kill_idx >= 0 && kill_idx < DBD_KILLER_NAME_COUNT) {
+                p.character_index = kill_idx;
+                snprintf(p.character_name, sizeof(p.character_name), "%s", DbdKillerNames[kill_idx]);
+            }
+        }
+
+        DbdTArray perk_id_arr{};
+        if (read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_PERK_IDS, perk_id_arr) &&
+            DbdIsLikelyPointer(perk_id_arr.Data) &&
+            perk_id_arr.Count > 0 && perk_id_arr.Count <= DBD_MAX_PERKS)
+        {
+            uint32_t count = (perk_id_arr.Count < DBD_MAX_PERKS) ? perk_id_arr.Count : DBD_MAX_PERKS;
+            unsigned char pbuf[DBD_MAX_PERKS * 8]{};
+            if (client_.read_mem(pid, perk_id_arr.Data, count * 8, pbuf)) {
+                p.perks_valid = true;
+                for (uint32_t i = 0; i < count; i++) {
+                    uint32_t comp_idx = 0;
+                    memcpy(&comp_idx, pbuf + i * 8, 4);
+                    p.perk_ids[i] = static_cast<int32_t>(comp_idx);
+
+                    if (gnames_resolved_ && comp_idx > 0) {
+                        std::string name = gnames_.resolve(client_, pid, comp_idx);
+                        if (!name.empty())
+                            snprintf(p.perk_names[i], sizeof(p.perk_names[i]), "%s", name.c_str());
+                    }
+                }
+            }
+        }
+
+        DbdTArray perk_lv_arr{};
+        if (read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_PERK_LEVELS, perk_lv_arr) &&
+            DbdIsLikelyPointer(perk_lv_arr.Data) &&
+            perk_lv_arr.Count > 0 && perk_lv_arr.Count <= DBD_MAX_PERKS)
+        {
+            uint32_t count = (perk_lv_arr.Count < DBD_MAX_PERKS) ? perk_lv_arr.Count : DBD_MAX_PERKS;
+            unsigned char pbuf[DBD_MAX_PERKS * 4]{};
+            if (client_.read_mem(pid, perk_lv_arr.Data, count * 4, pbuf))
+                memcpy(p.perk_levels, pbuf, count * 4);
+        }
+
+        auto& c = player_cache_[ps];
+        c.resolve_cycle = cycle_;
+        memcpy(c.character_name, p.character_name, sizeof(c.character_name));
+        c.character_index = p.character_index;
+        memcpy(c.perk_ids, p.perk_ids, sizeof(c.perk_ids));
+        memcpy(c.perk_levels, p.perk_levels, sizeof(c.perk_levels));
+        memcpy(c.perk_names, p.perk_names, sizeof(c.perk_names));
+        c.perks_valid = p.perks_valid;
+    }
+
+    void read_player_enrichment(int pid, uint64_t ps, uint64_t pawn, DbdPlayerData& p) {
+        read_character_and_perks(pid, ps, pawn, p);
 
         if (pawn != 0 && p.type == EDbdActorType::Survivor) {
             uint64_t health_comp = 0;
@@ -617,11 +742,7 @@ private:
     }
 
     void read_player_enrichment_lobby(int pid, uint64_t ps, DbdPlayerData& p) {
-        int32_t level = -1, prestige = -1;
-        read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_CHAR_LEVEL, level);
-        read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_PRESTIGE, prestige);
-        if (level >= 0 && level <= 100) p.level = level;
-        if (prestige >= 0 && prestige <= 100) p.prestige = prestige;
+        read_character_and_perks(pid, ps, 0, p);
     }
 
     void read_player_bones(int pid, uint64_t pawn, DbdPlayerData& p) {
@@ -712,16 +833,11 @@ private:
         if (count < 10) return;
 
         uint32_t total_bytes = count * sizeof(DbdFTransform);
-        std::vector<unsigned char> bulk(total_bytes, 0);
-        for (uint32_t off = 0; off < total_bytes; ) {
-            uint32_t chunk = total_bytes - off;
-            if (chunk > 4096) chunk = 4096;
-            if (!client_.read_mem(pid, bone_arr.Data + off, chunk, &bulk[off])) return;
-            off += chunk;
-        }
+        bone_bulk_buf_.resize(total_bytes);
+        if (!client_.read_mem(pid, bone_arr.Data, total_bytes, bone_bulk_buf_.data())) return;
 
         p.bone_count = count;
-        const auto* transforms = reinterpret_cast<const DbdFTransform*>(bulk.data());
+        const auto* transforms = reinterpret_cast<const DbdFTransform*>(bone_bulk_buf_.data());
         for (uint32_t i = 0; i < count; i++) {
             double bx = transforms[i].PosX;
             double by = transforms[i].PosY;

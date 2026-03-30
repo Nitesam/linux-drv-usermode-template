@@ -34,6 +34,8 @@
 #include "settings_store.h"
 
 #include "games/dbd/dbd_module.h"
+#include "web_radar.h"
+#include "web_radar_page.h"
 static std::unique_ptr<GameModule> create_game() { return std::make_unique<DbdModule>(); }
 
 static MemClient          g_client;
@@ -55,6 +57,13 @@ static std::shared_mutex           g_state_rwlock;
 
 static SettingsStore       g_settings_store;
 static std::string         g_settings_snapshot;
+
+static WebRadarServer      g_web_radar;
+static bool                g_web_radar_enabled = true;
+static std::chrono::steady_clock::time_point g_last_sse_push{};
+constexpr double           kSsePushIntervalSec = 0.10;
+static std::string         g_cached_json;
+static std::mutex          g_json_mtx;
 
 static std::vector<ScreenInfo> g_screens;
 static int                     g_selected_screen = 0;
@@ -127,12 +136,18 @@ static void reader_thread_func()
 
         local_game->update(g_client, g_target_pid, g_base_address);
 
+        std::string json = local_game->to_json();
+
+        auto render_snapshot = local_game->clone_for_render();
+
         {
             std::unique_lock<std::shared_mutex> wlock(g_state_rwlock);
-            g_shared_state = std::move(local_game);
+            g_shared_state = std::move(render_snapshot);
         }
-
-        local_game = create_game();
+        {
+            std::lock_guard<std::mutex> jlk(g_json_mtx);
+            g_cached_json = std::move(json);
+        }
     }
 }
 
@@ -342,6 +357,18 @@ int main(int argc, char **argv)
 
     std::thread reader_thread(reader_thread_func);
 
+    if (g_web_radar_enabled) {
+        g_web_radar.set_page(WEB_RADAR_HTML);
+        g_web_radar.set_state_provider([&]() -> std::string {
+            std::lock_guard<std::mutex> jlk(g_json_mtx);
+            return g_cached_json;
+        });
+        if (g_web_radar.start(30120))
+            LOG_INFO("Web Radar started on port 30120");
+        else
+            LOG_ERR("Web Radar failed to start");
+    }
+
     static float g_fps = 0;
     static int g_frame_count = 0;
     static auto g_fps_timer = std::chrono::steady_clock::now();
@@ -428,8 +455,10 @@ int main(int argc, char **argv)
                 if (ImGui::BeginTabItem("Players")) {
                     ImGui::BeginChild("##players_content", ImVec2(0, content_height - 40), true);
 
+                    std::string pre_ctrl = render_game->save_settings();
                     render_game->render_controls();
-                    g_settings_dirty = true;
+                    if (render_game->save_settings() != pre_ctrl)
+                        g_settings_dirty = true;
                     ImGui::Separator();
 
                     std::string st = render_game->status_text();
@@ -443,8 +472,10 @@ int main(int argc, char **argv)
 
                 if (ImGui::BeginTabItem("ESP")) {
                     ImGui::BeginChild("##esp_content", ImVec2(0, content_height - 40), true);
+                    std::string pre_esp = render_game->save_settings();
                     render_game->render_esp_controls();
-                    g_settings_dirty = true;
+                    if (render_game->save_settings() != pre_esp)
+                        g_settings_dirty = true;
                     ImGui::EndChild();
                     ImGui::EndTabItem();
                 }
@@ -518,6 +549,23 @@ int main(int argc, char **argv)
                         }
                     }
 
+                    ImGui::SeparatorText("Web Radar");
+                    ImGui::Checkbox("Enable Web Radar", &g_web_radar_enabled);
+                    if (g_web_radar.is_running()) {
+                        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f),
+                            "Running on port %d  |  %d client(s)",
+                            g_web_radar.port(), g_web_radar.client_count());
+                    } else if (g_web_radar_enabled) {
+                        if (ImGui::Button("Start", ImVec2(80, 0))) {
+                            g_web_radar.set_page(WEB_RADAR_HTML);
+                            g_web_radar.set_state_provider([&]() -> std::string {
+                                std::lock_guard<std::mutex> jlk(g_json_mtx);
+                                return g_cached_json;
+                            });
+                            g_web_radar.start(30120);
+                        }
+                    }
+
                     ImGui::EndChild();
                     ImGui::EndTabItem();
                 }
@@ -556,10 +604,20 @@ int main(int argc, char **argv)
         if (g_settings_store.should_flush()) {
             g_settings_store.save(g_settings_snapshot.c_str());
         }
+
+        if (g_web_radar.is_running()) {
+            auto now_sse = std::chrono::steady_clock::now();
+            double dt_sse = std::chrono::duration<double>(now_sse - g_last_sse_push).count();
+            if (dt_sse >= kSsePushIntervalSec) {
+                g_web_radar.broadcast_tick();
+                g_last_sse_push = now_sse;
+            }
+        }
     }
 
     g_running.store(false);
     reader_thread.join();
+    g_web_radar.stop();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

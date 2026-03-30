@@ -28,6 +28,12 @@ public:
 
     virtual std::string save_settings() { return {}; }
     virtual void load_settings(const std::string&) {}
+
+    virtual std::string to_json() { return "{}"; }
+
+    virtual std::shared_ptr<GameModule> clone_for_render() {
+        return std::shared_ptr<GameModule>(nullptr);
+    }
 };
 
 #endif

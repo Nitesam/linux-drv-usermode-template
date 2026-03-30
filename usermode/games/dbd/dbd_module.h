@@ -66,17 +66,19 @@ public:
                 "Error: %s", state_.error.c_str());
         }
 
-        if (!ImGui::BeginTable("DbdPlayerTable", 5,
+        if (!ImGui::BeginTable("DbdPlayerTable", 7,
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
                 ImGuiTableFlags_SizingStretchProp))
             return;
 
-        ImGui::TableSetupColumn("#",        ImGuiTableColumnFlags_WidthFixed, 30);
-        ImGui::TableSetupColumn("Role",     ImGuiTableColumnFlags_WidthFixed, 80);
-        ImGui::TableSetupColumn("Name",     ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Prestige", ImGuiTableColumnFlags_WidthFixed, 65);
-        ImGui::TableSetupColumn("Level",    ImGuiTableColumnFlags_WidthFixed, 55);
+        ImGui::TableSetupColumn("#",         ImGuiTableColumnFlags_WidthFixed, 30);
+        ImGui::TableSetupColumn("Role",      ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("Character", ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn("Name",      ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Prestige",  ImGuiTableColumnFlags_WidthFixed, 55);
+        ImGui::TableSetupColumn("Level",     ImGuiTableColumnFlags_WidthFixed, 45);
+        ImGui::TableSetupColumn("Perks",     ImGuiTableColumnFlags_WidthFixed, 130);
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
@@ -95,6 +97,11 @@ public:
             ImGui::TextColored(role_col, "%s",
                 p.type == EDbdActorType::Survivor ? "Survivor" : "Killer");
             ImGui::TableNextColumn();
+            if (p.character_name[0])
+                ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.5f, 1.0f), "%s", p.character_name);
+            else
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "--");
+            ImGui::TableNextColumn();
             if (p.is_local)
                 ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s (You)", p.name);
             else
@@ -109,12 +116,32 @@ public:
                 ImGui::Text("%d", p.level);
             else
                 ImGui::Text("-");
+            ImGui::TableNextColumn();
+            if (p.perks_valid) {
+                char perks_str[256];
+                int n = 0;
+                for (int pi = 0; pi < DBD_MAX_PERKS; pi++) {
+                    if (pi > 0) n += snprintf(perks_str + n, sizeof(perks_str) - n, " ");
+                    if (p.perk_names[pi][0])
+                        n += snprintf(perks_str + n, sizeof(perks_str) - n, "%s", p.perk_names[pi]);
+                    else if (p.perk_ids[pi] > 0)
+                        n += snprintf(perks_str + n, sizeof(perks_str) - n, "#%d", p.perk_ids[pi]);
+                    else
+                        n += snprintf(perks_str + n, sizeof(perks_str) - n, "-");
+                }
+                ImGui::Text("%s", perks_str);
+            } else {
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "--");
+            }
         }
 
         ImGui::EndTable();
     }
 
     void render_esp(ImDrawList* draw_list, int screen_w, int screen_h) override {
+        if (state_.valid && !state_.has_camera) {
+            esp_.render_lobby_panel(draw_list, state_, screen_w, screen_h);
+        }
         esp_.render(draw_list, state_, screen_w, screen_h);
     }
 
@@ -177,7 +204,89 @@ public:
         }
     }
 
+    std::string to_json() override {
+        char buf[16384];
+        int n = 0;
+        n += snprintf(buf + n, sizeof(buf) - n,
+            "{\"valid\":%s,\"has_camera\":%s,\"player_count\":%d,",
+            state_.valid ? "true" : "false",
+            state_.has_camera ? "true" : "false",
+            state_.player_count);
+
+        if (state_.has_camera) {
+            n += snprintf(buf + n, sizeof(buf) - n,
+                "\"camera\":{\"x\":%.0f,\"y\":%.0f,\"z\":%.0f,\"yaw\":%.1f,\"fov\":%.0f},",
+                state_.camera.Location.X, state_.camera.Location.Y, state_.camera.Location.Z,
+                state_.camera.Rotation.Yaw, state_.camera.FOV);
+        }
+
+        n += snprintf(buf + n, sizeof(buf) - n, "\"players\":[");
+        for (size_t i = 0; i < state_.players.size(); i++) {
+            const auto& p = state_.players[i];
+            if (!p.valid) continue;
+            if (i > 0) n += snprintf(buf + n, sizeof(buf) - n, ",");
+
+            n += snprintf(buf + n, sizeof(buf) - n,
+                "{\"name\":\"%s\",\"character\":\"%s\",\"role\":\"%s\","
+                "\"x\":%.0f,\"y\":%.0f,\"z\":%.0f,"
+                "\"hp\":%d,\"prestige\":%d,\"level\":%d,"
+                "\"is_local\":%s,",
+                p.name, p.character_name[0] ? p.character_name : "",
+                p.type == EDbdActorType::Survivor ? "survivor" : "killer",
+                p.position.X, p.position.Y, p.position.Z,
+                p.health_states, p.prestige, p.level,
+                p.is_local ? "true" : "false");
+
+            n += snprintf(buf + n, sizeof(buf) - n, "\"perks\":[");
+            for (int pi = 0; pi < DBD_MAX_PERKS; pi++) {
+                if (pi > 0) n += snprintf(buf + n, sizeof(buf) - n, ",");
+                if (p.perk_names[pi][0])
+                    n += snprintf(buf + n, sizeof(buf) - n, "\"%s\"", p.perk_names[pi]);
+                else
+                    n += snprintf(buf + n, sizeof(buf) - n, "\"\"");
+            }
+            n += snprintf(buf + n, sizeof(buf) - n, "]}");
+        }
+        n += snprintf(buf + n, sizeof(buf) - n, "],\"objects\":[");
+
+        for (size_t i = 0; i < state_.objects.size(); i++) {
+            const auto& o = state_.objects[i];
+            if (i > 0) n += snprintf(buf + n, sizeof(buf) - n, ",");
+            n += snprintf(buf + n, sizeof(buf) - n,
+                "{\"type\":\"%s\",\"x\":%.0f,\"y\":%.0f,\"z\":%.0f,\"dist\":%.0f",
+                DbdObjectTypeName(o.type), o.position.X, o.position.Y, o.position.Z, o.distance);
+
+            if (o.type == EDbdObjectType::Generator)
+                n += snprintf(buf + n, sizeof(buf) - n, ",\"progress\":%.1f,\"blocked\":%s",
+                    o.gen_progress, o.gen_blocked ? "true" : "false");
+            else if (o.type == EDbdObjectType::Pallet)
+                n += snprintf(buf + n, sizeof(buf) - n, ",\"state\":%d", o.pallet_state);
+            else if (o.type == EDbdObjectType::Totem)
+                n += snprintf(buf + n, sizeof(buf) - n, ",\"state\":%d", o.totem_state);
+            else if (o.type == EDbdObjectType::Hatch)
+                n += snprintf(buf + n, sizeof(buf) - n, ",\"state\":%d", o.hatch_state);
+            else if (o.type == EDbdObjectType::Hook)
+                n += snprintf(buf + n, sizeof(buf) - n, ",\"occupied\":%s,\"basement\":%s",
+                    o.hook_occupied ? "true" : "false", o.hook_basement ? "true" : "false");
+            else if (o.type == EDbdObjectType::Chest)
+                n += snprintf(buf + n, sizeof(buf) - n, ",\"opened\":%s", o.chest_opened ? "true" : "false");
+            else if (o.type == EDbdObjectType::EscapeDoor)
+                n += snprintf(buf + n, sizeof(buf) - n, ",\"activated\":%s", o.escape_activated ? "true" : "false");
+
+            n += snprintf(buf + n, sizeof(buf) - n, "}");
+        }
+        n += snprintf(buf + n, sizeof(buf) - n, "]}");
+        return std::string(buf, n);
+    }
+
+    std::shared_ptr<GameModule> clone_for_render() override {
+        auto snap = std::shared_ptr<DbdModule>(new DbdModule(state_));
+        return snap;
+    }
+
 private:
+    explicit DbdModule(const DbdWorldState& s) : state_(s) {}
+
     std::unique_ptr<DbdReader> reader_;
     DbdWorldState state_{};
     static inline DbdEspRenderer esp_{};

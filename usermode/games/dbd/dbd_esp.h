@@ -333,35 +333,29 @@ public:
                 }
             }
 
-            std::string label;
-            if (settings.show_name && p.name[0])
-                label = p.name;
-            if (p.prestige >= 0 || p.level >= 0) {
-                char pbuf[32];
-                if (p.prestige > 0)
-                    snprintf(pbuf, sizeof(pbuf), " P%d", p.prestige);
-                else
-                    pbuf[0] = 0;
-                char lvbuf[32] = {};
-                if (p.level >= 0)
-                    snprintf(lvbuf, sizeof(lvbuf), " Lv%d", p.level);
-                label += pbuf;
-                label += lvbuf;
+            char label[128];
+            int ln = 0;
+            if (settings.show_name) {
+                if (p.name[0])
+                    ln += snprintf(label + ln, sizeof(label) - ln, "%s", p.name);
+                else if (p.character_name[0])
+                    ln += snprintf(label + ln, sizeof(label) - ln, "%s", p.character_name);
             }
-            if (settings.show_distance && p.distance > 0) {
-                char dbuf[32];
-                snprintf(dbuf, sizeof(dbuf), " [%dm]", static_cast<int>(p.distance));
-                label += dbuf;
-            }
+            if (p.prestige > 0)
+                ln += snprintf(label + ln, sizeof(label) - ln, " P%d", p.prestige);
+            if (p.level >= 0)
+                ln += snprintf(label + ln, sizeof(label) - ln, " Lv%d", p.level);
+            if (settings.show_distance && p.distance > 0)
+                ln += snprintf(label + ln, sizeof(label) - ln, " [%dm]", static_cast<int>(p.distance));
 
-            if (!label.empty()) {
+            if (ln > 0) {
                 float label_y = std::min(sp_head.Y, sp_feet.Y);
-                auto ts = ImGui::CalcTextSize(label.c_str());
+                auto ts = ImGui::CalcTextSize(label);
                 float lx = sp_head.X - ts.x * 0.5f;
                 float ly = label_y - ts.y - 4.0f;
 
-                dl->AddText(ImVec2(lx + 1, ly + 1), IM_COL32(0, 0, 0, 200), label.c_str());
-                dl->AddText(ImVec2(lx, ly), col, label.c_str());
+                dl->AddText(ImVec2(lx + 1, ly + 1), IM_COL32(0, 0, 0, 200), label);
+                dl->AddText(ImVec2(lx, ly), col, label);
             }
 
             dl->AddCircleFilled(ImVec2(sp_head.X, sp_head.Y), 3.0f, col);
@@ -570,6 +564,98 @@ public:
         }
 
         dl->PopClipRect();
+    }
+
+    void render_lobby_panel(ImDrawList* dl, const DbdWorldState& state, int sw, int sh)
+    {
+        if (!state.valid || state.players.empty())
+            return;
+
+        float panel_x = sw * 0.5f - 220.0f;
+        float panel_y = sh * 0.15f;
+        float line_h = 20.0f;
+        float pad = 12.0f;
+
+        int surv_count = 0, kill_count = 0;
+        for (auto& p : state.players) {
+            if (p.type == EDbdActorType::Survivor) surv_count++;
+            else if (p.type == EDbdActorType::Killer) kill_count++;
+        }
+
+        int total_lines = 2 + (int)state.players.size() * 3 + 1;
+        float panel_h = total_lines * line_h + pad * 2;
+        float panel_w = 440.0f;
+
+        dl->AddRectFilled(ImVec2(panel_x, panel_y),
+                          ImVec2(panel_x + panel_w, panel_y + panel_h),
+                          IM_COL32(15, 15, 20, 220), 8.0f);
+        dl->AddRect(ImVec2(panel_x, panel_y),
+                    ImVec2(panel_x + panel_w, panel_y + panel_h),
+                    IM_COL32(80, 80, 120, 200), 8.0f, 0, 1.5f);
+
+        float cx = panel_x + pad;
+        float cy = panel_y + pad;
+
+        dl->AddText(ImVec2(cx, cy), IM_COL32(220, 180, 50, 255), "LOBBY INFO");
+        cy += line_h;
+
+        char summary[64];
+        snprintf(summary, sizeof(summary), "Players: %d  (S:%d  K:%d)",
+                 (int)state.players.size(), surv_count, kill_count);
+        dl->AddText(ImVec2(cx, cy), IM_COL32(180, 180, 180, 200), summary);
+        cy += line_h * 1.2f;
+
+        for (const auto& p : state.players) {
+            ImU32 role_col;
+            const char* role_tag;
+            if (p.type == EDbdActorType::Survivor) {
+                role_col = IM_COL32(50, 220, 80, 255);
+                role_tag = "[SURV]";
+            } else if (p.type == EDbdActorType::Killer) {
+                role_col = IM_COL32(255, 60, 60, 255);
+                role_tag = "[KILL]";
+            } else {
+                role_col = IM_COL32(180, 180, 180, 200);
+                role_tag = "[???]";
+            }
+
+            char line1[128];
+            if (p.character_name[0]) {
+                snprintf(line1, sizeof(line1), "%s %s  (%s)",
+                         role_tag, p.character_name, p.name[0] ? p.name : "?");
+            } else {
+                snprintf(line1, sizeof(line1), "%s %s",
+                         role_tag, p.name[0] ? p.name : "Unknown");
+            }
+            dl->AddText(ImVec2(cx, cy), role_col, line1);
+            cy += line_h;
+
+            char line2[128];
+            if (p.prestige > 0 && p.level >= 0)
+                snprintf(line2, sizeof(line2), "   P%d  Lv%d", p.prestige, p.level);
+            else if (p.level >= 0)
+                snprintf(line2, sizeof(line2), "   Lv%d", p.level);
+            else
+                snprintf(line2, sizeof(line2), "   --");
+            dl->AddText(ImVec2(cx, cy), IM_COL32(160, 160, 180, 200), line2);
+            cy += line_h;
+
+            if (p.perks_valid) {
+                char perk_line[256];
+                int n = snprintf(perk_line, sizeof(perk_line), "   Perks:");
+                for (int pi = 0; pi < DBD_MAX_PERKS; pi++) {
+                    if (p.perk_names[pi][0])
+                        n += snprintf(perk_line + n, sizeof(perk_line) - n, " %s", p.perk_names[pi]);
+                    else if (p.perk_ids[pi] > 0)
+                        n += snprintf(perk_line + n, sizeof(perk_line) - n, " #%d", p.perk_ids[pi]);
+                    if (pi < 3) n += snprintf(perk_line + n, sizeof(perk_line) - n, ",");
+                }
+                dl->AddText(ImVec2(cx, cy), IM_COL32(130, 150, 200, 200), perk_line);
+            } else {
+                dl->AddText(ImVec2(cx, cy), IM_COL32(100, 100, 100, 150), "   Perks: --");
+            }
+            cy += line_h * 1.1f;
+        }
     }
 
     void render_controls()

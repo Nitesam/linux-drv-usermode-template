@@ -26,7 +26,12 @@
 #define DBD_PLAYER_ARRAY                 0x02F0
 #define DBD_PLAYER_DATA                  0x0558
 #define DBD_PLAYER_DATA_CHAR_LEVEL       0x0000
+#define DBD_PLAYER_DATA_PERK_IDS         0x0010
+#define DBD_PLAYER_DATA_PERK_LEVELS      0x0020
 #define DBD_PLAYER_DATA_PRESTIGE         0x007C
+
+#define DBD_SELECTED_SURVIVOR_INDEX      0x05E8
+#define DBD_SELECTED_KILLER_INDEX        0x05EC
 
 #define DBD_DIRECT_ACTORS_ARRAY          0x0C0
 #define DBD_DIRECT_ACTORS_COUNT          0x0C8
@@ -75,6 +80,83 @@
 #define DBD_AURA_COLOR_G                 0x368
 #define DBD_AURA_COLOR_B                 0x36C
 #define DBD_AURA_COLOR_A                 0x370
+
+#define DBD_MAX_PERKS 4
+
+inline const char* DbdSurvivorNames[] = {
+    "Dwight", "Meg", "Claudette", "Jake",
+    "Nea", "Laurie", "Ace", "Bill",
+    "Feng", "David", "Quentin", "Tapp",
+    "Kate", "Adam", "Jeff", "Jane",
+    "Ash", "Nancy", "Steve", "Yui",
+    "Zarina", "Cheryl", "Felix", "Elodie",
+    "Yun-Jin", "Jill", "Leon", "Mikaela",
+    "Jonah", "Yoichi", "Haddie", "Ada",
+    "Rebecca", "Vittorio", "Thalita", "Renato",
+    "Gabriel", "Nicolas", "Ellen", "Alan",
+    "Sable", "Aestri", "Lara", "Trevor",
+    "Taurie",
+};
+constexpr int DBD_SURVIVOR_NAME_COUNT = sizeof(DbdSurvivorNames) / sizeof(DbdSurvivorNames[0]);
+
+inline const char* DbdKillerNames[] = {
+    "Trapper", "Wraith", "Hillbilly", "Nurse",
+    "Shape", "Hag", "Doctor", "Huntress",
+    "Cannibal", "Nightmare", "Pig", "Clown",
+    "Spirit", "Legion", "Plague", "Ghost Face",
+    "Demogorgon", "Oni", "Deathslinger", "Executioner",
+    "Blight", "Twins", "Trickster", "Nemesis",
+    "Cenobite", "Artist", "Onryo", "Dredge",
+    "Mastermind", "Knight", "Skull Merchant", "Singularity",
+    "Xenomorph", "Good Guy", "Unknown", "Lich",
+    "Dark Lord", "Houndmaster", "Trooper", "Valkyrie",
+};
+constexpr int DBD_KILLER_NAME_COUNT = sizeof(DbdKillerNames) / sizeof(DbdKillerNames[0]);
+
+inline const char* DbdMapClassToCharacter(const std::string& cls) {
+    struct ClassMap { const char* pat; const char* name; };
+    static const ClassMap surv_map[] = {
+        {"CamperMale01", "Dwight"}, {"CamperFemale01", "Meg"},
+        {"CamperFemale03", "Claudette"}, {"CamperMale02", "Jake"},
+        {"CamperFemale04", "Nea"}, {"CamperFemale05", "Laurie"},
+        {"CamperMale03", "Ace"}, {"CamperMale04", "Bill"},
+        {"CamperFemale06", "Feng"}, {"CamperMale05", "David"},
+        {"CamperMale06", "Quentin"}, {"CamperMale07", "Tapp"},
+        {"CamperFemale07", "Kate"}, {"CamperMale08", "Adam"},
+        {"CamperMale09", "Jeff"}, {"CamperFemale08", "Jane"},
+        {"CamperMale10", "Ash"}, {"CamperFemale09", "Nancy"},
+        {"CamperMale11", "Steve"}, {"CamperFemale10", "Yui"},
+        {"CamperFemale11", "Zarina"}, {"CamperFemale12", "Cheryl"},
+        {"CamperMale12", "Felix"}, {"CamperFemale13", "Elodie"},
+        {"CamperFemale14", "Yun-Jin"}, {"CamperFemale15", "Jill"},
+        {"CamperMale13", "Leon"}, {"CamperFemale16", "Mikaela"},
+        {"CamperMale14", "Jonah"}, {"CamperMale15", "Yoichi"},
+        {"CamperFemale17", "Haddie"}, {"CamperFemale18", "Ada"},
+        {"CamperFemale19", "Rebecca"}, {"CamperMale16", "Vittorio"},
+        {"CamperFemale20", "Thalita"}, {"CamperMale17", "Renato"},
+        {"CamperMale18", "Gabriel"}, {"CamperMale19", "Nicolas"},
+        {"CamperFemale21", "Ellen"}, {"CamperMale20", "Alan"},
+        {"CamperFemale22", "Sable"}, {"CamperFemale23", "Aestri"},
+        {"CamperFemale24", "Lara"}, {"CamperMale21", "Trevor"},
+        {"CamperFemale25", "Taurie"},
+    };
+    for (auto& e : surv_map)
+        if (cls.find(e.pat) != std::string::npos) return e.name;
+
+    if (cls.find("Slasher") != std::string::npos) {
+        for (int i = DBD_KILLER_NAME_COUNT - 1; i >= 0; i--) {
+            char pat[8];
+            snprintf(pat, sizeof(pat), "_%02d", i + 1);
+            auto pos = cls.find(pat);
+            if (pos != std::string::npos) {
+                char next = (pos + strlen(pat) < cls.size()) ? cls[pos + strlen(pat)] : 0;
+                if (next == '_' || next == 0 || next == '.')
+                    return DbdKillerNames[i];
+            }
+        }
+    }
+    return nullptr;
+}
 
 enum class EDbdPlayerRole : uint8_t {
     Role_None     = 0,
@@ -178,6 +260,7 @@ inline const char* DbdBoneNames[BONE_COUNT] = {
 struct DbdPlayerData {
     uint64_t       address{};
     char           name[64]{};
+    char           character_name[32]{};
     EDbdActorType  type{EDbdActorType::Unknown};
     EDbdPlayerRole role{EDbdPlayerRole::Role_None};
     DbdUEVector    position{};
@@ -188,6 +271,11 @@ struct DbdPlayerData {
     int32_t        health_states{-1};
     int32_t        level{-1};
     int32_t        prestige{-1};
+    int32_t        character_index{-1};
+    int32_t        perk_ids[DBD_MAX_PERKS]{};
+    int32_t        perk_levels[DBD_MAX_PERKS]{};
+    char           perk_names[DBD_MAX_PERKS][48]{};
+    bool           perks_valid{};
     uint64_t       mesh_component{};
     DbdUEVector    bone_positions[DBD_MAX_BONES];
     uint32_t       bone_count{};
