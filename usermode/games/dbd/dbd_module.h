@@ -66,18 +66,19 @@ public:
                 "Error: %s", state_.error.c_str());
         }
 
-        if (!ImGui::BeginTable("DbdPlayerTable", 7,
+        if (!ImGui::BeginTable("DbdPlayerTable", 8,
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
                 ImGuiTableFlags_SizingStretchProp))
             return;
 
-        ImGui::TableSetupColumn("#",         ImGuiTableColumnFlags_WidthFixed, 30);
-        ImGui::TableSetupColumn("Role",      ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableSetupColumn("Character", ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn("Pin",       ImGuiTableColumnFlags_WidthFixed, 30);
+        ImGui::TableSetupColumn("#",         ImGuiTableColumnFlags_WidthFixed, 25);
+        ImGui::TableSetupColumn("Role",      ImGuiTableColumnFlags_WidthFixed, 60);
+        ImGui::TableSetupColumn("Character", ImGuiTableColumnFlags_WidthFixed, 90);
         ImGui::TableSetupColumn("Name",      ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Prestige",  ImGuiTableColumnFlags_WidthFixed, 55);
-        ImGui::TableSetupColumn("Level",     ImGuiTableColumnFlags_WidthFixed, 45);
+        ImGui::TableSetupColumn("Prestige",  ImGuiTableColumnFlags_WidthFixed, 50);
+        ImGui::TableSetupColumn("Level",     ImGuiTableColumnFlags_WidthFixed, 40);
         ImGui::TableSetupColumn("Perks",     ImGuiTableColumnFlags_WidthFixed, 130);
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
@@ -88,9 +89,25 @@ public:
 
             ImGui::TableNextRow();
 
-            ImVec4 role_col = (p.type == EDbdActorType::Survivor)
-                ? ImVec4(0.0f, 0.86f, 0.2f, 1.0f)
-                : ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
+            bool is_killer = (p.type == EDbdActorType::Killer);
+
+            if (auto_pin_killer_ && is_killer && p.playerstate != 0)
+                pinned_players_.insert(p.playerstate);
+
+            ImVec4 role_col = is_killer
+                ? ImVec4(1.0f, 0.2f, 0.2f, 1.0f)
+                : ImVec4(0.0f, 0.86f, 0.2f, 1.0f);
+
+            ImGui::TableNextColumn();
+            {
+                bool pinned = (p.playerstate != 0 && pinned_players_.count(p.playerstate));
+                ImGui::PushID(idx);
+                if (ImGui::Checkbox("##pin", &pinned)) {
+                    if (pinned) pinned_players_.insert(p.playerstate);
+                    else pinned_players_.erase(p.playerstate);
+                }
+                ImGui::PopID();
+            }
 
             ImGui::TableNextColumn(); ImGui::Text("%d", ++idx);
             ImGui::TableNextColumn();
@@ -136,6 +153,10 @@ public:
         }
 
         ImGui::EndTable();
+
+        ImGui::Checkbox("Auto-pin Killer", &auto_pin_killer_);
+
+        cleanup_pinned_players();
     }
 
     void render_esp(ImDrawList* draw_list, int screen_w, int screen_h) override {
@@ -143,6 +164,7 @@ public:
             esp_.render_lobby_panel(draw_list, state_, screen_w, screen_h);
         }
         esp_.render(draw_list, state_, screen_w, screen_h);
+        render_pinned_overlay(draw_list, screen_w, screen_h);
     }
 
     void render_esp_controls() override {
@@ -338,9 +360,67 @@ public:
 private:
     explicit DbdModule(const DbdWorldState& s) : state_(s) {}
 
+    void cleanup_pinned_players() {
+        if (pinned_players_.empty()) return;
+        std::unordered_set<uint64_t> valid_addrs;
+        for (const auto& p : state_.players)
+            if (p.valid && p.playerstate != 0) valid_addrs.insert(p.playerstate);
+        for (auto it = pinned_players_.begin(); it != pinned_players_.end(); ) {
+            if (valid_addrs.count(*it) == 0)
+                it = pinned_players_.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    void render_pinned_overlay(ImDrawList* dl, int sw, int sh) {
+        if (pinned_players_.empty()) return;
+
+        float x = 12.0f, y = 30.0f;
+        const float line_h = 18.0f;
+        const ImU32 shadow = IM_COL32(0, 0, 0, 200);
+        const ImU32 name_col = IM_COL32(255, 220, 100, 255);
+        const ImU32 char_col = IM_COL32(200, 200, 200, 255);
+        const ImU32 perk_col = IM_COL32(180, 255, 180, 255);
+        const ImU32 killer_col = IM_COL32(255, 80, 80, 255);
+
+        for (const auto& p : state_.players) {
+            if (!p.valid || p.playerstate == 0) continue;
+            if (pinned_players_.count(p.playerstate) == 0) continue;
+
+            bool is_killer = (p.type == EDbdActorType::Killer);
+            ImU32 role_c = is_killer ? killer_col : name_col;
+
+            char header[128];
+            snprintf(header, sizeof(header), "%s%s%s%s",
+                p.name[0] ? p.name : "?",
+                p.character_name[0] ? " (" : "",
+                p.character_name[0] ? p.character_name : "",
+                p.character_name[0] ? ")" : "");
+
+            dl->AddText(ImVec2(x + 1, y + 1), shadow, header);
+            dl->AddText(ImVec2(x, y), role_c, header);
+            y += line_h;
+
+            if (p.perks_valid) {
+                for (int i = 0; i < DBD_MAX_PERKS; i++) {
+                    if (!p.perk_names[i][0]) continue;
+                    char pline[64];
+                    snprintf(pline, sizeof(pline), "  %s", p.perk_names[i]);
+                    dl->AddText(ImVec2(x + 1, y + 1), shadow, pline);
+                    dl->AddText(ImVec2(x, y), perk_col, pline);
+                    y += line_h;
+                }
+            }
+            y += 6.0f;
+        }
+    }
+
     std::unique_ptr<DbdReader> reader_;
     DbdWorldState state_{};
     static inline DbdEspRenderer esp_{};
+    static inline std::unordered_set<uint64_t> pinned_players_{};
+    static inline bool auto_pin_killer_ = true;
 };
 
 #endif

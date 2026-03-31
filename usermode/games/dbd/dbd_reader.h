@@ -389,6 +389,7 @@ private:
 
             bool is_local = (pawn != 0 && pawn == local_pawn);
             p.is_local = is_local;
+            p.playerstate = ps;
 
             if (pawn != 0) {
                 p.address = pawn;

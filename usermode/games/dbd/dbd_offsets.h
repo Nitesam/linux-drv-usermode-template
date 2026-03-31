@@ -362,6 +362,7 @@ inline const char* DbdBoneNames[BONE_COUNT] = {
 
 struct DbdPlayerData {
     uint64_t       address{};
+    uint64_t       playerstate{};
     char           name[64]{};
     char           character_name[32]{};
     EDbdActorType  type{EDbdActorType::Unknown};
