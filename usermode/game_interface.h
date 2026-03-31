@@ -2,6 +2,7 @@
 #define GAME_INTERFACE_H
 
 #include <string>
+#include <memory>
 #include "mem_client.h"
 
 struct ImDrawList;

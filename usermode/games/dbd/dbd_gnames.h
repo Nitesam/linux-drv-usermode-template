@@ -59,14 +59,17 @@ public:
     bool test_resolve(MemClient& client, int pid, uint64_t test_obj) {
         std::string result = resolve_object_class_name(client, pid, test_obj);
         if (!result.empty()) {
-            LOG_CHAIN("[GN] GNames OK at 0x%lX (test='%s')", gnames_addr_, result.c_str());
+            snprintf(test_result_, sizeof(test_result_), "%s", result.c_str());
             return true;
         }
         return false;
     }
 
+    const char* get_test_result() const { return test_result_; }
+
 private:
     uint64_t gnames_addr_{};
+    char test_result_[64]{};
     std::unordered_map<uint32_t, std::string> cache_;
 
     std::string read_fname(MemClient& client, int pid, uint32_t index) {

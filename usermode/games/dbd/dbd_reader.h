@@ -6,12 +6,45 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include "dbd_perks.h"
 #include <unordered_set>
 
 #include "mem_client.h"
 #include "logger.h"
 #include "dbd_offsets.h"
 #include "dbd_gnames.h"
+
+struct DbdDebugState {
+    uint64_t gworld{};
+    uint64_t persistent_level{};
+    uint64_t game_state{};
+    uint64_t local_pawn{};
+    bool gnames_ok{};
+    char gnames_test[32]{};
+    uint32_t actor_scan_count{};
+    uint32_t object_match_count{};
+    uint32_t aura_cache_size{};
+    uint32_t player_array_count{};
+    uint32_t c2w_offset{};
+    uint32_t bone_array_offset{};
+    uint32_t bone_info_stride{};
+    uint32_t bone_count_first{};
+    int bones_mapped_count{};
+    char weapon_id[64]{};
+
+    static constexpr int MAX_EVENTS = 16;
+    char events[MAX_EVENTS][128]{};
+    int event_count{};
+
+    void add_event(const char* fmt, ...) {
+        if (event_count >= MAX_EVENTS) return;
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(events[event_count], sizeof(events[0]), fmt, args);
+        va_end(args);
+        event_count++;
+    }
+};
 
 struct DbdWorldState {
     bool valid{};
@@ -22,6 +55,7 @@ struct DbdWorldState {
     std::vector<DbdPlayerData> players{};
     std::vector<DbdObjectData> objects{};
     std::string error{};
+    DbdDebugState debug{};
 };
 
 class DbdReader {
@@ -50,11 +84,6 @@ public:
         state.base_address = base_address;
         ++cycle_;
 
-        bool verbose = (cycle_ == 1);
-
-        if (verbose)
-            LOG_CHAIN("==== DBD CYCLE #1 ====  PID=%d  Base=0x%lX", pid, base_address);
-
         uint64_t gworld = 0;
         {
             unsigned char raw[8]{};
@@ -66,6 +95,7 @@ public:
             state.error = "GWorld not found";
             return state;
         }
+        state.debug.gworld = gworld;
 
         if (gworld != last_gworld_) {
             actor_class_cache_.clear();
@@ -73,9 +103,6 @@ public:
             player_cache_.clear();
             last_gworld_ = gworld;
         }
-
-        if (verbose)
-            LOG_CHAIN("[1] GWorld = 0x%lX", gworld);
 
         if (!gnames_resolved_) {
             static const uint64_t gnames_offsets[] = {
@@ -92,17 +119,16 @@ public:
                 }
             }
             if (!gnames_resolved_)
-                LOG_CHAIN("[GN] GNames resolution FAILED for all offsets");
+                state.debug.add_event("GNames: FAILED all offsets");
         }
+        state.debug.gnames_ok = gnames_resolved_;
 
         uint64_t persistent_level = 0;
         if (!read_ptr(pid, gworld + DBD_PERSISTENT_LEVEL, persistent_level)) {
             state.error = "PersistentLevel failed";
             return state;
         }
-
-        if (verbose)
-            LOG_CHAIN("[2] PersistentLevel = 0x%lX", persistent_level);
+        state.debug.persistent_level = persistent_level;
 
         uint64_t owning_instance = 0, local_players = 0;
         uint64_t player_controller = 0, camera_manager = 0;
@@ -115,14 +141,12 @@ public:
 
         if (chain_ok) {
             read_ptr(pid, player_controller + DBD_ACK_PAWN, local_pawn);
-            if (verbose && local_pawn)
-                LOG_CHAIN("[LOCAL] Pawn=0x%lX", local_pawn);
+            state.debug.local_pawn = local_pawn;
         }
 
         if (chain_ok) {
             if (read_ptr(pid, player_controller + DBD_CAMERA_MANAGER, camera_manager)) {
-                bool cam_found = false;
-                for (uint32_t cam_off = 0; cam_off <= 0x20 && !cam_found; cam_off += 0x8) {
+                for (uint32_t cam_off = 0; cam_off <= 0x20; cam_off += 0x8) {
                     DbdMinimalViewInfo pov{};
                     if (read_val(pid, camera_manager + DBD_CAMERA_CACHE_PRIVATE + 0x10 + cam_off, pov)) {
                         if (std::isfinite(pov.FOV) && pov.FOV > 1.0f && pov.FOV < 180.0f &&
@@ -130,23 +154,18 @@ public:
                             std::isfinite(pov.Rotation.Pitch) && std::abs(pov.Rotation.Pitch) < 89.0) {
                             state.camera = pov;
                             state.has_camera = true;
-                            cam_found = true;
-                            if (verbose)
-                                LOG_CHAIN("[CAM] off=+0x%X FOV=%.1f Pos=(%.0f,%.0f,%.0f) Pitch=%.1f Yaw=%.1f",
-                                          cam_off, pov.FOV,
-                                          pov.Location.X, pov.Location.Y, pov.Location.Z,
-                                          pov.Rotation.Pitch, pov.Rotation.Yaw);
+                            break;
                         }
                     }
                 }
             }
         }
 
-        read_players_from_gamestate(pid, gworld, local_pawn, state, verbose);
+        read_players_from_gamestate(pid, gworld, local_pawn, state);
 
         bool object_scan = (cycle_ % 60 == 0) || (cycle_ == 1);
         if (object_scan)
-            scan_objects(pid, persistent_level, state, verbose);
+            scan_objects(pid, persistent_level, state);
         else {
             state.objects = cached_objects_;
             ++obj_update_counter_;
@@ -207,16 +226,9 @@ public:
 
         state.player_count = static_cast<int32_t>(state.players.size());
         state.valid = true;
-
-        if (verbose) {
-            int survivors = 0, killers = 0;
-            for (auto& p : state.players) {
-                if (p.type == EDbdActorType::Survivor) survivors++;
-                else killers++;
-            }
-            LOG_CHAIN("Players: %d (S:%d K:%d) | Objects: %zu",
-                      state.player_count, survivors, killers, state.objects.size());
-        }
+        state.debug.aura_cache_size = static_cast<uint32_t>(aura_cache_.size());
+        if (state_debug_weapon_[0])
+            memcpy(state.debug.weapon_id, state_debug_weapon_, sizeof(state.debug.weapon_id));
 
         return state;
     }
@@ -234,8 +246,8 @@ private:
     std::unordered_map<uint64_t, int> actor_class_cache_;
     uint64_t last_gworld_{};
     uint32_t obj_update_counter_{};
-    std::vector<unsigned char> bone_bulk_buf_;
     std::vector<uint64_t> actor_ptrs_buf_;
+    char state_debug_weapon_[64]{};
 
     struct PlayerEnrichCache {
         char character_name[32]{};
@@ -290,12 +302,6 @@ private:
             if (class_name.find("DBDAura") != std::string::npos ||
                 class_name.find("AuraComponent") != std::string::npos) {
                 aura_cache_[actor_addr] = {comp, cycle_};
-                static int log_count = 0;
-                if (log_count < 5) {
-                    LOG_CHAIN("[AURA] Found at 0x%lX for actor 0x%lX (class=%s)",
-                              comp, actor_addr, class_name.c_str());
-                    log_count++;
-                }
                 return comp;
             }
         }
@@ -342,20 +348,19 @@ private:
     }
 
     void read_players_from_gamestate(int pid, uint64_t gworld, uint64_t local_pawn,
-                                     DbdWorldState& state, bool verbose)
+                                     DbdWorldState& state)
     {
         uint64_t game_state = 0;
         if (!read_ptr(pid, gworld + DBD_GAME_STATE, game_state))
             return;
+        state.debug.game_state = game_state;
 
         DbdTArray player_array{};
         if (!read_val(pid, game_state + DBD_PLAYER_ARRAY, player_array))
             return;
         if (!DbdIsLikelyPointer(player_array.Data) || player_array.Count == 0 || player_array.Count > 20)
             return;
-
-        if (verbose)
-            LOG_CHAIN("[PS] GameState=0x%lX PlayerArray count=%u", game_state, player_array.Count);
+        state.debug.player_array_count = player_array.Count;
 
         for (uint32_t i = 0; i < player_array.Count; ++i) {
             uint64_t ps = 0;
@@ -402,28 +407,22 @@ private:
                     p.position = state.camera.Location;
 
                 if (is_local) {
-                    read_character_and_perks(pid, ps, pawn, p);
+                    read_character_and_perks(pid, ps, pawn, p, &state.debug);
                 } else {
-                    read_player_enrichment(pid, ps, pawn, p);
+                    read_player_enrichment(pid, ps, pawn, p, &state.debug);
                 }
             } else {
-                read_player_enrichment_lobby(pid, ps, p);
+                read_player_enrichment_lobby(pid, ps, p, &state.debug);
             }
 
             p.valid = true;
-
-            if (verbose)
-                LOG_CHAIN("[P] %s pawn=0x%lX pos=(%.0f,%.0f,%.0f) hp=%d lv=%d p=%d local=%d",
-                          p.name, pawn,
-                          p.position.X, p.position.Y, p.position.Z,
-                          p.health_states, p.level, p.prestige, is_local ? 1 : 0);
 
             state.players.push_back(p);
         }
     }
 
     void scan_objects(int pid, uint64_t persistent_level,
-                      DbdWorldState& state, bool verbose)
+                      DbdWorldState& state)
     {
         uint64_t actor_array = 0;
         uint32_t actor_count = 0;
@@ -499,9 +498,8 @@ private:
         }
 
         cached_objects_ = state.objects;
-
-        if (verbose)
-            LOG_CHAIN("[OBJ] Scanned %u actors, matched %zu objects", ptrs_to_read, state.objects.size());
+        state.debug.actor_scan_count = ptrs_to_read;
+        state.debug.object_match_count = static_cast<uint32_t>(state.objects.size());
     }
 
     static bool classify_object(const std::string& name, EDbdObjectType& out) {
@@ -623,7 +621,8 @@ private:
         }
     }
 
-    void read_character_and_perks(int pid, uint64_t ps, uint64_t pawn, DbdPlayerData& p) {
+    void read_character_and_perks(int pid, uint64_t ps, uint64_t pawn, DbdPlayerData& p,
+                                  DbdDebugState* dbg = nullptr) {
         int32_t level = -1, prestige = -1;
         read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_CHAR_LEVEL, level);
         read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_PRESTIGE, prestige);
@@ -633,14 +632,16 @@ private:
         auto pc_it = player_cache_.find(ps);
         if (pc_it != player_cache_.end() && (cycle_ - pc_it->second.resolve_cycle) < PLAYER_CACHE_TTL) {
             auto& c = pc_it->second;
-            if (c.character_name[0])
-                snprintf(p.character_name, sizeof(p.character_name), "%s", c.character_name);
-            p.character_index = c.character_index;
-            memcpy(p.perk_ids, c.perk_ids, sizeof(p.perk_ids));
-            memcpy(p.perk_levels, c.perk_levels, sizeof(p.perk_levels));
-            memcpy(p.perk_names, c.perk_names, sizeof(p.perk_names));
-            p.perks_valid = c.perks_valid;
-            return;
+            if (c.character_name[0] || c.perks_valid) {
+                if (c.character_name[0])
+                    snprintf(p.character_name, sizeof(p.character_name), "%s", c.character_name);
+                p.character_index = c.character_index;
+                memcpy(p.perk_ids, c.perk_ids, sizeof(p.perk_ids));
+                memcpy(p.perk_levels, c.perk_levels, sizeof(p.perk_levels));
+                memcpy(p.perk_names, c.perk_names, sizeof(p.perk_names));
+                p.perks_valid = c.perks_valid;
+                return;
+            }
         }
 
         if (pawn != 0 && gnames_resolved_) {
@@ -657,12 +658,6 @@ private:
                         snprintf(p.character_name, sizeof(p.character_name), "%s", sub.c_str());
                     }
                 }
-                static int cls_log = 0;
-                if (cls_log < 10) {
-                    LOG_CHAIN("[CHAR] pawn=0x%lX class='%s' -> '%s'",
-                              pawn, cls.c_str(), p.character_name[0] ? p.character_name : "?");
-                    cls_log++;
-                }
             }
         }
 
@@ -670,6 +665,21 @@ private:
             int32_t surv_idx = -1, kill_idx = -1;
             read_val(pid, ps + DBD_SELECTED_SURVIVOR_INDEX, surv_idx);
             read_val(pid, ps + DBD_SELECTED_KILLER_INDEX, kill_idx);
+            p.debug_surv_idx = surv_idx;
+            p.debug_kill_idx = kill_idx;
+
+            if (gnames_resolved_) {
+                uint32_t cc_fname = 0;
+                unsigned char ccbuf[4]{};
+                if (client_.read_mem(pid, ps + DBD_EQUIPPED_CHAR_CLASS, 4, ccbuf)) {
+                    memcpy(&cc_fname, ccbuf, 4);
+                    if (cc_fname > 0) {
+                        std::string ccname = gnames_.resolve(client_, pid, cc_fname);
+                        if (!ccname.empty())
+                            snprintf(p.debug_char_class, sizeof(p.debug_char_class), "%s", ccname.c_str());
+                    }
+                }
+            }
 
             if (p.type == EDbdActorType::Survivor && surv_idx >= 0 && surv_idx < DBD_SURVIVOR_NAME_COUNT) {
                 p.character_index = surv_idx;
@@ -681,23 +691,60 @@ private:
         }
 
         DbdTArray perk_id_arr{};
-        if (read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_PERK_IDS, perk_id_arr) &&
-            DbdIsLikelyPointer(perk_id_arr.Data) &&
+        if (read_val(pid, ps + DBD_PLAYER_DATA + DBD_PLAYER_DATA_PERK_IDS, perk_id_arr)) {
+            p.debug_perk_arr_count = perk_id_arr.Count;
+            p.debug_perk_arr_data = perk_id_arr.Data;
+        }
+        if (DbdIsLikelyPointer(perk_id_arr.Data) &&
             perk_id_arr.Count > 0 && perk_id_arr.Count <= DBD_MAX_PERKS)
         {
             uint32_t count = (perk_id_arr.Count < DBD_MAX_PERKS) ? perk_id_arr.Count : DBD_MAX_PERKS;
-            unsigned char pbuf[DBD_MAX_PERKS * 8]{};
-            if (client_.read_mem(pid, perk_id_arr.Data, count * 8, pbuf)) {
+            static constexpr int PERK_BUF_SIZE = 128;
+            unsigned char pbuf[PERK_BUF_SIZE]{};
+            if (client_.read_mem(pid, perk_id_arr.Data, PERK_BUF_SIZE, pbuf)) {
                 p.perks_valid = true;
+
+                int best_stride = 0;
+                int best_hits = 0;
+                for (int try_stride : {8, 12, 16, 24}) {
+                    if (try_stride * (int)count > PERK_BUF_SIZE) continue;
+                    int hits = 0;
+                    for (uint32_t i = 0; i < count; i++) {
+                        uint32_t idx = 0;
+                        memcpy(&idx, pbuf + i * try_stride, 4);
+                        if (idx > 0 && idx < 0x200000) {
+                            std::string test = gnames_.resolve(client_, pid, idx);
+                            if (!test.empty() && test != "None" && test[0] != '_')
+                                hits++;
+                        }
+                    }
+                    if (hits > best_hits) {
+                        best_hits = hits;
+                        best_stride = try_stride;
+                    }
+                }
+                if (best_stride == 0) best_stride = 8;
+
                 for (uint32_t i = 0; i < count; i++) {
                     uint32_t comp_idx = 0;
-                    memcpy(&comp_idx, pbuf + i * 8, 4);
+                    memcpy(&comp_idx, pbuf + i * best_stride, 4);
                     p.perk_ids[i] = static_cast<int32_t>(comp_idx);
 
+                    if (best_stride >= 16) {
+                        int32_t lv = 0;
+                        memcpy(&lv, pbuf + i * best_stride + 0x0C, 4);
+                        if (lv >= 0 && lv <= 3) p.perk_levels[i] = lv;
+                    }
+
                     if (gnames_resolved_ && comp_idx > 0) {
-                        std::string name = gnames_.resolve(client_, pid, comp_idx);
-                        if (!name.empty())
-                            snprintf(p.perk_names[i], sizeof(p.perk_names[i]), "%s", name.c_str());
+                        std::string raw_name = gnames_.resolve(client_, pid, comp_idx);
+                        if (!raw_name.empty()) {
+                            const char* display = DbdResolvePerkDisplayName(raw_name);
+                            if (display)
+                                snprintf(p.perk_names[i], sizeof(p.perk_names[i]), "%s", display);
+                            else
+                                snprintf(p.perk_names[i], sizeof(p.perk_names[i]), "%s", raw_name.c_str());
+                        }
                     }
                 }
             }
@@ -724,8 +771,9 @@ private:
         c.perks_valid = p.perks_valid;
     }
 
-    void read_player_enrichment(int pid, uint64_t ps, uint64_t pawn, DbdPlayerData& p) {
-        read_character_and_perks(pid, ps, pawn, p);
+    void read_player_enrichment(int pid, uint64_t ps, uint64_t pawn, DbdPlayerData& p,
+                                DbdDebugState* dbg = nullptr) {
+        read_character_and_perks(pid, ps, pawn, p, dbg);
 
         if (pawn != 0 && p.type == EDbdActorType::Survivor) {
             uint64_t health_comp = 0;
@@ -741,8 +789,104 @@ private:
         read_player_bones(pid, pawn, p);
     }
 
-    void read_player_enrichment_lobby(int pid, uint64_t ps, DbdPlayerData& p) {
-        read_character_and_perks(pid, ps, 0, p);
+    void read_player_enrichment_lobby(int pid, uint64_t ps, DbdPlayerData& p,
+                                      DbdDebugState* dbg = nullptr) {
+        read_character_and_perks(pid, ps, 0, p, dbg);
+
+        if (p.character_name[0] == 0 && p.type == EDbdActorType::Killer && gnames_resolved_) {
+            try_identify_killer_by_weapon(pid, ps, p);
+        }
+    }
+
+    void try_identify_killer_by_weapon(int pid, uint64_t ps, DbdPlayerData& p) {
+
+        {
+            uint32_t power_fname = 0;
+            unsigned char fbuf[4]{};
+            if (client_.read_mem(pid, ps + DBD_POWER_OR_ITEM_ID, 4, fbuf)) {
+                memcpy(&power_fname, fbuf, 4);
+                if (power_fname > 0) {
+                    std::string power_name = gnames_.resolve(client_, pid, power_fname);
+                    if (!power_name.empty()) {
+                        const char* killer = DbdMapWeaponToKiller(power_name);
+                        if (killer) {
+                            snprintf(p.character_name, sizeof(p.character_name), "%s", killer);
+                            snprintf(state_debug_weapon_, sizeof(state_debug_weapon_), "%s (power: %s)", killer, power_name.c_str());
+                            return;
+                        }
+                        snprintf(state_debug_weapon_, sizeof(state_debug_weapon_), "power: %s", power_name.c_str());
+                    }
+                }
+            }
+        }
+
+        {
+            DbdTArray parts{};
+            if (read_val(pid, ps + DBD_CUSTOMIZATION_PARTS, parts) &&
+                DbdIsLikelyPointer(parts.Data) && parts.Count > 0 && parts.Count <= 20)
+            {
+                uint32_t count = (parts.Count < 10) ? parts.Count : 10;
+                for (uint32_t i = 0; i < count; i++) {
+                    uint64_t item_ptr = 0;
+                    if (!read_ptr(pid, parts.Data + i * 8, item_ptr)) continue;
+
+                    uint32_t fname_idx = 0;
+                    unsigned char ibuf[4]{};
+                    if (client_.read_mem(pid, item_ptr + DBD_OBJECT_NAME, 4, ibuf)) {
+                        memcpy(&fname_idx, ibuf, 4);
+                        if (fname_idx > 0) {
+                            std::string name = gnames_.resolve(client_, pid, fname_idx);
+                            if (!name.empty()) {
+                                const char* killer = DbdMapWeaponToKiller(name);
+                                if (killer) {
+                                    snprintf(p.character_name, sizeof(p.character_name), "%s", killer);
+                                    snprintf(state_debug_weapon_, sizeof(state_debug_weapon_), "%s (custom: %s)", killer, name.c_str());
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    std::string cls = gnames_.resolve_object_class_name(client_, pid, item_ptr);
+                    if (!cls.empty()) {
+                        const char* killer = DbdMapWeaponToKiller(cls);
+                        if (killer) {
+                            snprintf(p.character_name, sizeof(p.character_name), "%s", killer);
+                            snprintf(state_debug_weapon_, sizeof(state_debug_weapon_), "%s (class: %s)", killer, cls.c_str());
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            DbdTArray comp_array{};
+            if (!read_val(pid, ps + DBD_ACTOR_COMPONENTS, comp_array)) return;
+            if (!DbdIsLikelyPointer(comp_array.Data) || comp_array.Count == 0 || comp_array.Count > 100) return;
+
+            uint32_t count = (comp_array.Count < 30) ? comp_array.Count : 30;
+            for (uint32_t i = 0; i < count; i++) {
+                uint64_t comp = 0;
+                if (!read_ptr(pid, comp_array.Data + i * 8, comp)) continue;
+
+                uint32_t fname_idx = 0;
+                unsigned char ibuf[4]{};
+                if (!client_.read_mem(pid, comp + DBD_OBJECT_NAME, 4, ibuf)) continue;
+                memcpy(&fname_idx, ibuf, 4);
+                if (fname_idx == 0) continue;
+
+                std::string name = gnames_.resolve(client_, pid, fname_idx);
+                if (name.empty()) continue;
+
+                const char* killer = DbdMapWeaponToKiller(name);
+                if (killer) {
+                    snprintf(p.character_name, sizeof(p.character_name), "%s", killer);
+                    snprintf(state_debug_weapon_, sizeof(state_debug_weapon_), "%s (comp: %s)", killer, name.c_str());
+                    return;
+                }
+            }
+        }
     }
 
     void read_player_bones(int pid, uint64_t pawn, DbdPlayerData& p) {
@@ -771,8 +915,6 @@ private:
                         memcpy(&tz, scan + off + 48, 8);
                         if (std::isfinite(tx) && std::abs(tx) > 100 && std::abs(tx) < 1e7) {
                             c2w_rot_offset_ = off;
-                            LOG_CHAIN("[BONE] Found C2W quaternion at meshComp+0x%X (%.3f,%.3f,%.3f,%.3f) pos=(%.0f,%.0f,%.0f)",
-                                off, r[0], r[1], r[2], r[3], tx, ty, tz);
                             break;
                         }
                     }
@@ -816,7 +958,6 @@ private:
                     continue;
 
                 bone_array_offset_ = scan_start + off;
-                LOG_CHAIN("[BONE] Found transform array at meshComp+0x%X count=%u", bone_array_offset_, arr.Count);
                 break;
             }
             if (bone_array_offset_ == 0) return;
@@ -833,11 +974,11 @@ private:
         if (count < 10) return;
 
         uint32_t total_bytes = count * sizeof(DbdFTransform);
-        bone_bulk_buf_.resize(total_bytes);
-        if (!client_.read_mem(pid, bone_arr.Data, total_bytes, bone_bulk_buf_.data())) return;
+        std::vector<unsigned char> bulk(total_bytes, 0);
+        if (!client_.read_mem(pid, bone_arr.Data, total_bytes, bulk.data())) return;
 
         p.bone_count = count;
-        const auto* transforms = reinterpret_cast<const DbdFTransform*>(bone_bulk_buf_.data());
+        const auto* transforms = reinterpret_cast<const DbdFTransform*>(bulk.data());
         for (uint32_t i = 0; i < count; i++) {
             double bx = transforms[i].PosX;
             double by = transforms[i].PosY;
@@ -859,18 +1000,6 @@ private:
         static bool bone_debug_logged = false;
         if (!bone_debug_logged && count > 5) {
             bone_debug_logged = true;
-            LOG_CHAIN("[BONE-DBG] base_pos=(%.0f,%.0f,%.0f)",
-                base_pos.X, base_pos.Y, base_pos.Z);
-            LOG_CHAIN("[BONE-DBG] bone[0] raw=(%.1f,%.1f,%.1f) world=(%.0f,%.0f,%.0f)",
-                transforms[0].PosX, transforms[0].PosY, transforms[0].PosZ,
-                p.bone_positions[0].X, p.bone_positions[0].Y, p.bone_positions[0].Z);
-            if (p.bones_mapped && p.bone_map[BONE_HEAD] >= 0) {
-                int hi = p.bone_map[BONE_HEAD];
-                LOG_CHAIN("[BONE-DBG] head[%d] raw=(%.1f,%.1f,%.1f)",
-                    hi, transforms[hi].PosX, transforms[hi].PosY, transforms[hi].PosZ);
-            }
-            LOG_CHAIN("[BONE-DBG] actor pos=(%.0f,%.0f,%.0f)",
-                p.position.X, p.position.Y, p.position.Z);
         }
     }
 
@@ -900,7 +1029,6 @@ private:
                 if (matched >= 5) {
                     stride = try_stride;
                     bone_info_stride_ = try_stride;
-                    LOG_CHAIN("[BONE] BoneInfo stride=%d matched=%d bones=%u", try_stride, matched, bone_info.Count);
                     break;
                 }
             }
@@ -939,10 +1067,7 @@ private:
 
         if (found >= 8) {
             p.bones_mapped = true;
-            if (!bone_mapped_addrs_.count(mesh_comp)) {
-                bone_mapped_addrs_.insert(mesh_comp);
-                LOG_CHAIN("[BONE] Mapped %d/%d bones", found, BONE_COUNT);
-            }
+            bone_mapped_addrs_.insert(mesh_comp);
         }
     }
 };

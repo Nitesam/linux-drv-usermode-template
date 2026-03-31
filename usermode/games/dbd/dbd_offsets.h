@@ -32,6 +32,9 @@
 
 #define DBD_SELECTED_SURVIVOR_INDEX      0x05E8
 #define DBD_SELECTED_KILLER_INDEX        0x05EC
+#define DBD_CUSTOMIZATION_PARTS          0x0520
+#define DBD_EQUIPPED_CHAR_CLASS          0x05A8
+#define DBD_POWER_OR_ITEM_ID             0x05B4
 
 #define DBD_DIRECT_ACTORS_ARRAY          0x0C0
 #define DBD_DIRECT_ACTORS_COUNT          0x0C8
@@ -88,20 +91,21 @@ inline const char* DbdSurvivorNames[] = {
     "Nea", "Laurie", "Ace", "Bill",
     "Feng", "David", "Quentin", "Tapp",
     "Kate", "Adam", "Jeff", "Jane",
-    "Ash", "Nancy", "Steve", "Yui",
+    "Ash", "Steve", "Nancy", "Yui",
     "Zarina", "Cheryl", "Felix", "Elodie",
     "Yun-Jin", "Jill", "Leon", "Mikaela",
     "Jonah", "Yoichi", "Haddie", "Ada",
     "Rebecca", "Vittorio", "Thalita", "Renato",
     "Gabriel", "Nicolas", "Ellen", "Alan",
     "Sable", "Aestri", "Lara", "Trevor",
-    "Taurie",
+    "Taurie", "Orela", "Rick", "Michonne",
+    "Vee", "Dustin", "Eleven", "Kwon",
 };
 constexpr int DBD_SURVIVOR_NAME_COUNT = sizeof(DbdSurvivorNames) / sizeof(DbdSurvivorNames[0]);
 
 inline const char* DbdKillerNames[] = {
     "Trapper", "Wraith", "Hillbilly", "Nurse",
-    "Shape", "Hag", "Doctor", "Huntress",
+    "Hag", "Shape", "Doctor", "Huntress",
     "Cannibal", "Nightmare", "Pig", "Clown",
     "Spirit", "Legion", "Plague", "Ghost Face",
     "Demogorgon", "Oni", "Deathslinger", "Executioner",
@@ -109,7 +113,8 @@ inline const char* DbdKillerNames[] = {
     "Cenobite", "Artist", "Onryo", "Dredge",
     "Mastermind", "Knight", "Skull Merchant", "Singularity",
     "Xenomorph", "Good Guy", "Unknown", "Lich",
-    "Dark Lord", "Houndmaster", "Trooper", "Valkyrie",
+    "Dark Lord", "Houndmaster", "Ghoul", "Animatronic",
+    "Krasue", "First",
 };
 constexpr int DBD_KILLER_NAME_COUNT = sizeof(DbdKillerNames) / sizeof(DbdKillerNames[0]);
 
@@ -138,7 +143,10 @@ inline const char* DbdMapClassToCharacter(const std::string& cls) {
         {"CamperFemale21", "Ellen"}, {"CamperMale20", "Alan"},
         {"CamperFemale22", "Sable"}, {"CamperFemale23", "Aestri"},
         {"CamperFemale24", "Lara"}, {"CamperMale21", "Trevor"},
-        {"CamperFemale25", "Taurie"},
+        {"CamperFemale25", "Taurie"}, {"CamperFemale26", "Orela"},
+        {"CamperMale22", "Rick"}, {"CamperFemale27", "Michonne"},
+        {"CamperFemale28", "Vee"}, {"CamperMale23", "Dustin"},
+        {"CamperFemale29", "Eleven"}, {"CamperMale24", "Kwon"},
     };
     for (auto& e : surv_map)
         if (cls.find(e.pat) != std::string::npos) return e.name;
@@ -154,6 +162,101 @@ inline const char* DbdMapClassToCharacter(const std::string& cls) {
                     return DbdKillerNames[i];
             }
         }
+    }
+    return nullptr;
+}
+
+inline const char* DbdMapWeaponToKiller(const std::string& item_name) {
+    struct WeaponMap { const char* prefix; const char* killer; };
+    static const WeaponMap weapon_map[] = {
+        {"Item_Slasher_BearTrap",    "Trapper"},
+        {"Item_Slasher_CloakBell",   "Wraith"},
+        {"Item_Slasher_Chainsaw",    "Hillbilly"},
+        {"Item_Slasher_Blink",       "Nurse"},
+        {"Item_Slasher_Phantasm",    "Hag"},
+        {"Item_Slasher_Stalk",       "Shape"},
+        {"Item_Slasher_Shock",       "Doctor"},
+        {"Item_Slasher_Hatchet",     "Huntress"},
+        {"Item_Slasher_Tantrum",     "Cannibal"},
+        {"Item_Slasher_Dream",       "Nightmare"},
+        {"Item_Slasher_Crouch",      "Pig"},
+        {"Item_Slasher_GasBomb",     "Clown"},
+        {"Item_Slasher_Phase",       "Spirit"},
+        {"Item_Slasher_Frenzy",      "Legion"},
+        {"Item_Slasher_Vomit",       "Plague"},
+        {"Item_Slasher_Ghost",       "Ghost Face"},
+        {"Item_Slasher_Shred",       "Demogorgon"},
+        {"Item_Slasher_Kanabo",      "Oni"},
+        {"Item_Slasher_Harpoon",     "Deathslinger"},
+        {"Item_Slasher_Trail",       "Executioner"},
+        {"Item_Slasher_Rush",        "Blight"},
+        {"Item_Slasher_Twin",        "Twins"},
+        {"Item_Slasher_Laceration",  "Trickster"},
+        {"Item_Slasher_Zombie",      "Nemesis"},
+        {"Item_Slasher_LamentConfig","Cenobite"},
+        {"Item_Slasher_Crow",        "Artist"},
+        {"Item_Slasher_Condemn",     "Onryo"},
+        {"Item_Slasher_Nightfall",   "Dredge"},
+        {"Item_Slasher_Virus",       "Mastermind"},
+        {"Item_Slasher_Summon",      "Knight"},
+        {"Item_Slasher_Drone",       "Skull Merchant"},
+        {"Item_Slasher_OverClock",   "Singularity"},
+        {"Item_Slasher_Tail",        "Xenomorph"},
+        {"Item_Slasher_Doll",        "Good Guy"},
+        {"Item_Slasher_Delirium",    "Unknown"},
+        {"Item_Slasher_Lich",        "Lich"},
+        {"Item_Slasher_DarkLord",    "Dark Lord"},
+        {"Item_Slasher_Hound",       "Houndmaster"},
+        {"Item_Slasher",             "Killer"},
+        {"S01_",            "Trapper"},
+        {"TW_",             "Wraith"},
+        {"Wraith_",         "Wraith"},
+        {"Hillbilly_",      "Hillbilly"},
+        {"TC_",             "Hillbilly"},
+        {"Nurse_",          "Nurse"},
+        {"TN_",             "Nurse"},
+        {"HA_",             "Hag"},
+        {"MM_",             "Shape"},
+        {"DO_",             "Doctor"},
+        {"BE_",             "Huntress"},
+        {"CA_",             "Cannibal"},
+        {"SD_",             "Nightmare"},
+        {"FK_",             "Pig"},
+        {"GK_",             "Clown"},
+        {"HK_",             "Spirit"},
+        {"KK_",             "Legion"},
+        {"MK_",             "Plague"},
+        {"OK_",             "Ghost Face"},
+        {"QK_",             "Demogorgon"},
+        {"SwedenKiller_",   "Oni"},
+        {"UkraineKiller_",  "Deathslinger"},
+        {"K20_",            "Executioner"},
+        {"K21_",            "Blight"},
+        {"K22_",            "Twins"},
+        {"K23_",            "Trickster"},
+        {"K24_",            "Nemesis"},
+        {"K25_",            "Cenobite"},
+        {"K26_",            "Artist"},
+        {"K27_",            "Onryo"},
+        {"K28_",            "Dredge"},
+        {"K29_",            "Mastermind"},
+        {"K30_",            "Knight"},
+        {"K31_",            "Skull Merchant"},
+        {"K32_",            "Singularity"},
+        {"K33_",            "Xenomorph"},
+        {"K34_",            "Good Guy"},
+        {"K35_",            "Unknown"},
+        {"K36_",            "Lich"},
+        {"K37_",            "Dark Lord"},
+        {"K38_",            "Houndmaster"},
+        {"K39_",            "Ghoul"},
+        {"K40_",            "Animatronic"},
+        {"K41_",            "Krasue"},
+        {"K42_",            "The First"},
+    };
+    for (auto& e : weapon_map) {
+        if (item_name.find(e.prefix) != std::string::npos)
+            return e.killer;
     }
     return nullptr;
 }
@@ -282,6 +385,11 @@ struct DbdPlayerData {
     int            bone_map[BONE_COUNT];
     bool           bones_mapped{};
     uint64_t       aura_component{};
+    int32_t        debug_surv_idx{-99};
+    int32_t        debug_kill_idx{-99};
+    char           debug_char_class[48]{};
+    uint32_t       debug_perk_arr_count{};
+    uint64_t       debug_perk_arr_data{};
 };
 
 struct DbdObjectData {

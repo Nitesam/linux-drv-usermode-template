@@ -154,53 +154,104 @@ public:
         auto warn = ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
         auto fail = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
         auto dim = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+        auto white = ImVec4(1,1,1,1);
+        auto& d = state_.debug;
 
         if (ImGui::BeginTable("##dbg", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
-            ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 130);
+            ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 140);
             ImGui::TableSetupColumn("Value");
 
-            ImGui::TableNextColumn(); ImGui::TextColored(dim, "Base");
-            ImGui::TableNextColumn(); ImGui::Text("0x%lX", state_.base_address);
+            auto row_text = [&](const char* key, ImVec4 col, const char* val) {
+                ImGui::TableNextColumn(); ImGui::TextColored(dim, "%s", key);
+                ImGui::TableNextColumn(); ImGui::TextColored(col, "%s", val);
+            };
+            auto row_hex = [&](const char* key, ImVec4 col, uint64_t val) {
+                ImGui::TableNextColumn(); ImGui::TextColored(dim, "%s", key);
+                ImGui::TableNextColumn(); ImGui::TextColored(col, "0x%lX", val);
+            };
+            auto row_int = [&](const char* key, uint32_t val) {
+                ImGui::TableNextColumn(); ImGui::TextColored(dim, "%s", key);
+                ImGui::TableNextColumn(); ImGui::Text("%u", val);
+            };
 
-            ImGui::TableNextColumn(); ImGui::TextColored(dim, "GWorld");
-            ImGui::TableNextColumn();
-            ImGui::TextColored(state_.valid ? ok : fail, "%s", state_.valid ? "OK" : "FAIL");
-
-            ImGui::TableNextColumn(); ImGui::TextColored(dim, "GNames");
-            ImGui::TableNextColumn();
-            bool gn = (reader_ && !state_.objects.empty());
-            ImGui::TextColored(gn ? ok : warn, "%s", gn ? "Resolved" : "Pending");
+            row_hex("Base", white, state_.base_address);
+            row_hex("GWorld", d.gworld ? ok : fail, d.gworld);
+            row_hex("PersistentLevel", d.persistent_level ? ok : fail, d.persistent_level);
+            row_hex("GameState", d.game_state ? ok : fail, d.game_state);
+            row_hex("LocalPawn", d.local_pawn ? ok : warn, d.local_pawn);
+            row_text("GNames", d.gnames_ok ? ok : fail, d.gnames_ok ? "OK" : "FAILED");
 
             ImGui::TableNextColumn(); ImGui::TextColored(dim, "Camera");
             ImGui::TableNextColumn();
             if (state_.has_camera)
-                ImGui::Text("FOV=%.0f  (%.0f, %.0f, %.0f)",
+                ImGui::TextColored(ok, "FOV=%.0f (%.0f,%.0f,%.0f)",
                     state_.camera.FOV,
                     state_.camera.Location.X, state_.camera.Location.Y, state_.camera.Location.Z);
             else
                 ImGui::TextColored(fail, "NO");
 
-            ImGui::TableNextColumn(); ImGui::TextColored(dim, "Players");
-            ImGui::TableNextColumn();
             int surv = 0, kill = 0;
             for (auto& p : state_.players) {
                 if (p.type == EDbdActorType::Survivor) surv++;
                 else kill++;
             }
-            ImGui::Text("%d  (S:%d K:%d)", state_.player_count, surv, kill);
+            ImGui::TableNextColumn(); ImGui::TextColored(dim, "Players");
+            ImGui::TableNextColumn(); ImGui::Text("%d (S:%d K:%d)", state_.player_count, surv, kill);
 
-            ImGui::TableNextColumn(); ImGui::TextColored(dim, "Objects");
-            ImGui::TableNextColumn();
-            ImGui::Text("%zu", state_.objects.size());
+            row_int("PlayerArray", d.player_array_count);
+            row_int("Actors Scanned", d.actor_scan_count);
+            row_int("Objects Found", d.object_match_count);
+            row_int("Aura Cache", d.aura_cache_size);
 
+            int bone_p = 0;
+            for (auto& p : state_.players) if (p.bone_count > 0) bone_p++;
             ImGui::TableNextColumn(); ImGui::TextColored(dim, "Bones");
-            ImGui::TableNextColumn();
-            if (!state_.players.empty() && state_.players[0].bone_count > 0)
-                ImGui::TextColored(ok, "%u bones", state_.players[0].bone_count);
-            else
-                ImGui::TextColored(warn, "Not found");
+            ImGui::TableNextColumn(); ImGui::TextColored(bone_p > 0 ? ok : warn, "%d players with bones", bone_p);
+
+            if (d.weapon_id[0]) {
+                ImGui::TableNextColumn(); ImGui::TextColored(dim, "Weapon ID");
+                ImGui::TableNextColumn(); ImGui::TextColored(ok, "%s", d.weapon_id);
+            }
 
             ImGui::EndTable();
+        }
+
+        if (d.event_count > 0 && ImGui::CollapsingHeader("Events")) {
+            for (int i = 0; i < d.event_count; i++)
+                ImGui::TextColored(warn, "%s", d.events[i]);
+        }
+
+        if (!state_.players.empty() && ImGui::CollapsingHeader("Player Details")) {
+            for (size_t pi = 0; pi < state_.players.size(); pi++) {
+                auto& p = state_.players[pi];
+                char hdr[96];
+                snprintf(hdr, sizeof(hdr), "%s (%s) %s",
+                    p.name[0] ? p.name : "?",
+                    p.character_name[0] ? p.character_name : "?",
+                    p.is_local ? "[LOCAL]" : "");
+                if (ImGui::TreeNode((void*)(uintptr_t)pi, "%s", hdr)) {
+                    ImGui::TextColored(dim, "Pos: (%.0f, %.0f, %.0f)  Dist: %.0fm",
+                        p.position.X, p.position.Y, p.position.Z, p.distance);
+                    ImGui::TextColored(dim, "HP: %d  Lv: %d  Prestige: %d  Bones: %u",
+                        p.health_states, p.level, p.prestige, p.bone_count);
+                    ImGui::TextColored(dim, "Idx: surv=%d kill=%d  CharClass: %s",
+                        p.debug_surv_idx, p.debug_kill_idx,
+                        p.debug_char_class[0] ? p.debug_char_class : "-");
+                    ImGui::TextColored(dim, "PerkArr: data=0x%lX count=%u",
+                        p.debug_perk_arr_data, p.debug_perk_arr_count);
+                    if (p.perks_valid) {
+                        for (int i = 0; i < DBD_MAX_PERKS; i++) {
+                            if (p.perk_names[i][0])
+                                ImGui::TextColored(ok, "  Perk[%d]: %s (Lv%d)", i, p.perk_names[i], p.perk_levels[i]);
+                            else if (p.perk_ids[i] > 0)
+                                ImGui::TextColored(warn, "  Perk[%d]: id=%d (unresolved)", i, p.perk_ids[i]);
+                            else
+                                ImGui::TextColored(fail, "  Perk[%d]: (empty)", i);
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+            }
         }
     }
 

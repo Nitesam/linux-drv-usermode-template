@@ -138,16 +138,16 @@ static void reader_thread_func()
 
         std::string json = local_game->to_json();
 
-        auto render_snapshot = local_game->clone_for_render();
-
         {
             std::unique_lock<std::shared_mutex> wlock(g_state_rwlock);
-            g_shared_state = std::move(render_snapshot);
+            g_shared_state = std::move(local_game);
         }
         {
             std::lock_guard<std::mutex> jlk(g_json_mtx);
             g_cached_json = std::move(json);
         }
+
+        local_game = create_game();
     }
 }
 
@@ -372,6 +372,7 @@ int main(int argc, char **argv)
     static float g_fps = 0;
     static int g_frame_count = 0;
     static auto g_fps_timer = std::chrono::steady_clock::now();
+    static float g_ui_scale = 1.0f;
     constexpr double kTargetFrameTime = 1.0 / 120.0;
 
     while (!glfwWindowShouldClose(window)) {
@@ -388,6 +389,17 @@ int main(int argc, char **argv)
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+
+        auto& io = ImGui::GetIO();
+        if (io.KeyCtrl && io.MouseWheel != 0.0f) {
+            g_ui_scale += io.MouseWheel * 0.1f;
+            if (g_ui_scale < 0.5f) g_ui_scale = 0.5f;
+            if (g_ui_scale > 2.0f) g_ui_scale = 2.0f;
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Equal))  { g_ui_scale += 0.1f; if (g_ui_scale > 2.0f) g_ui_scale = 2.0f; }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Minus))   { g_ui_scale -= 0.1f; if (g_ui_scale < 0.5f) g_ui_scale = 0.5f; }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0))       { g_ui_scale = 1.0f; }
+        io.FontGlobalScale = g_ui_scale;
 
         std::shared_ptr<GameModule> render_game;
         {
@@ -413,13 +425,13 @@ int main(int argc, char **argv)
         fg->AddText(ImVec2(g_screen_width - 80.0f, 5.0f), IM_COL32(180, 180, 180, 180), fps_buf);
 
         if (g_ui_visible) {
-            ImVec2 win_size(700, 500);
+            ImVec2 win_size(700 * g_ui_scale, 700 * g_ui_scale);
             ImGui::SetNextWindowPos(ImVec2((g_screen_width - win_size.x) * 0.5f,
                                            (g_screen_height - win_size.y) * 0.5f), ImGuiCond_Always);
             ImGui::SetNextWindowSize(win_size, ImGuiCond_Always);
             ImGui::Begin("##MainPanel", &g_ui_visible,
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
-                         ImGuiWindowFlags_NoResize);
+                         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollWithMouse);
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f, 0.8f, 0.4f, 1.0f));
             ImGui::Text(u8"\u2588\u2588  %s", render_game->game_name());
