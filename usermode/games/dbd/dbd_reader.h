@@ -44,6 +44,18 @@ struct DbdDebugState {
         va_end(args);
         event_count++;
     }
+
+    static constexpr int MAX_UNKNOWN_ACTORS = 32;
+    char unknown_actors[MAX_UNKNOWN_ACTORS][64]{};
+    int unknown_actor_count{};
+
+    void add_unknown_actor(const char* name) {
+        for (int i = 0; i < unknown_actor_count; i++)
+            if (strcmp(unknown_actors[i], name) == 0) return;
+        if (unknown_actor_count >= MAX_UNKNOWN_ACTORS) return;
+        snprintf(unknown_actors[unknown_actor_count], sizeof(unknown_actors[0]), "%s", name);
+        unknown_actor_count++;
+    }
 };
 
 struct DbdWorldState {
@@ -474,7 +486,21 @@ private:
                 }
                 found = classify_object(class_name, obj_type);
                 actor_class_cache_[actor] = found ? static_cast<int>(obj_type) : -1;
-                if (!found) continue;
+                if (!found) {
+                    if (class_name.find("Interactable") != std::string::npos ||
+                        class_name.find("Event") != std::string::npos ||
+                        class_name.find("Door") != std::string::npos ||
+                        class_name.find("Gate") != std::string::npos ||
+                        class_name.find("Escape") != std::string::npos ||
+                        class_name.find("Blood") != std::string::npos ||
+                        class_name.find("Pump") != std::string::npos ||
+                        class_name.find("Dispenser") != std::string::npos ||
+                        class_name.find("Prop_") != std::string::npos ||
+                        class_name.find("Item") != std::string::npos) {
+                        state.debug.add_unknown_actor(class_name.c_str());
+                    }
+                    continue;
+                }
             }
 
 
@@ -518,9 +544,19 @@ private:
         if (name.find("Trap") != std::string::npos ||
             name.find("BearTrap") != std::string::npos)         { out = EDbdObjectType::Trap; return true; }
         if (name.find("EscapeDoor") != std::string::npos ||
-            name.find("ExitGate") != std::string::npos)         { out = EDbdObjectType::EscapeDoor; return true; }
+            name.find("ExitGate") != std::string::npos ||
+            name.find("DoorEscape") != std::string::npos ||
+            name.find("ExitDoor") != std::string::npos ||
+            name.find("_Escape") != std::string::npos ||
+            name.find("Gate_BP") != std::string::npos)          { out = EDbdObjectType::EscapeDoor; return true; }
         if (name.find("BreakableWall") != std::string::npos ||
             name.find("Breakable") != std::string::npos)        { out = EDbdObjectType::BreakableDoor; return true; }
+        if (name.find("BloodPump") != std::string::npos ||
+            name.find("Blood_Pump") != std::string::npos ||
+            name.find("BloodDispenser") != std::string::npos ||
+            name.find("FuelPump") != std::string::npos ||
+            name.find("JerryCan") != std::string::npos ||
+            name.find("EventInteract") != std::string::npos)    { out = EDbdObjectType::BloodPump; return true; }
         return false;
     }
 

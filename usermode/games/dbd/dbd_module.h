@@ -275,6 +275,12 @@ public:
                 }
             }
         }
+
+        if (d.unknown_actor_count > 0 && ImGui::CollapsingHeader("Unknown Actors")) {
+            ImGui::TextColored(dim, "Unclassified actors with interesting names:");
+            for (int i = 0; i < d.unknown_actor_count; i++)
+                ImGui::TextColored(warn, "  %s", d.unknown_actors[i]);
+        }
     }
 
     std::string to_json() override {

@@ -425,7 +425,7 @@ int main(int argc, char **argv)
         fg->AddText(ImVec2(g_screen_width - 80.0f, 5.0f), IM_COL32(180, 180, 180, 180), fps_buf);
 
         if (g_ui_visible) {
-            ImVec2 win_size(700 * g_ui_scale, 700 * g_ui_scale);
+            ImVec2 win_size(1100 * g_ui_scale, 800 * g_ui_scale);
             ImGui::SetNextWindowPos(ImVec2((g_screen_width - win_size.x) * 0.5f,
                                            (g_screen_height - win_size.y) * 0.5f), ImGuiCond_Always);
             ImGui::SetNextWindowSize(win_size, ImGuiCond_Always);

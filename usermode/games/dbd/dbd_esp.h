@@ -86,6 +86,7 @@ inline ImU32 DbdObjectColor(EDbdObjectType t) {
         case EDbdObjectType::Trap:          return IM_COL32(220,  20,  60, 255);
         case EDbdObjectType::EscapeDoor:    return IM_COL32( 50, 205,  50, 255);
         case EDbdObjectType::BreakableDoor: return IM_COL32(210, 105,  30, 255);
+        case EDbdObjectType::BloodPump:     return IM_COL32(255,  50, 220, 255);
         default:                            return IM_COL32(200, 200, 200, 255);
     }
 }
@@ -110,10 +111,11 @@ struct DbdEspSettings {
         100.0f,  // Trap
         200.0f,  // EscapeDoor
         80.0f,   // BreakableDoor
+        200.0f,  // BloodPump
     };
     bool  obj_show[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
         true,  true,  true,  true,  true,
-        true,  true,  true,  true,  true, true
+        true,  true,  true,  true,  true, true, true
     };
 
     bool  show_debug_overlay = false;
@@ -125,7 +127,7 @@ struct DbdEspSettings {
     float aura_surv_color[4] = {0.0f, 1.0f, 0.0f, 0.5f};
     float aura_killer_color[4] = {1.0f, 0.0f, 0.0f, 0.75f};
     bool  aura_obj[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
-        true, true, true, true, true, false, true, true, true, true, false
+        true, true, true, true, true, false, true, true, true, true, false, true
     };
     float aura_obj_color[static_cast<int>(EDbdObjectType::OBJ_COUNT)][4] = {
         {0.13f, 0.83f, 0.69f, 0.5f},
@@ -139,6 +141,7 @@ struct DbdEspSettings {
         {0.86f, 0.08f, 0.24f, 0.5f},
         {0.2f, 0.8f, 0.2f, 0.5f},
         {0.82f, 0.41f, 0.12f, 0.5f},
+        {0.8f, 0.1f, 0.1f, 0.6f},
     };
 
     DbdAuraConfig get_aura_config() const {

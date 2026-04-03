@@ -327,6 +327,7 @@ enum class EDbdObjectType : uint8_t {
     Trap,
     EscapeDoor,
     BreakableDoor,
+    BloodPump,
     OBJ_COUNT
 };
 
@@ -343,6 +344,7 @@ inline const char* DbdObjectTypeName(EDbdObjectType t) {
         case EDbdObjectType::Trap:          return "Trap";
         case EDbdObjectType::EscapeDoor:    return "Exit Gate";
         case EDbdObjectType::BreakableDoor: return "Breakable";
+        case EDbdObjectType::BloodPump:     return "Event";
         default: return "?";
     }
 }
@@ -462,7 +464,7 @@ struct DbdAuraConfig {
     DbdAuraColor survivor_color{0.0f, 1.0f, 0.0f, 0.5f};
     DbdAuraColor killer_color{1.0f, 0.0f, 0.0f, 0.75f};
     bool obj_aura[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
-        true, true, true, true, true, false, true, true, true, true, false
+        true, true, true, true, true, false, true, true, true, true, false, true
     };
     DbdAuraColor obj_color[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
         {0.13f, 0.83f, 0.69f, 0.5f},
@@ -476,6 +478,7 @@ struct DbdAuraConfig {
         {0.86f, 0.08f, 0.24f, 0.5f},
         {0.2f, 0.8f, 0.2f, 0.5f},
         {0.82f, 0.41f, 0.12f, 0.5f},
+        {0.8f, 0.1f, 0.1f, 0.6f},
     };
 };
 
