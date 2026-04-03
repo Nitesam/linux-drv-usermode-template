@@ -241,6 +241,7 @@ private:
     std::vector<DbdObjectData> cached_objects_;
     uint32_t bone_array_offset_{};
     int bone_info_stride_{};
+    int perk_stride_{};
     uint32_t c2w_rot_offset_{};
     std::unordered_set<uint64_t> bone_mapped_addrs_;
     std::unordered_map<uint64_t, int> actor_class_cache_;
@@ -705,26 +706,39 @@ private:
             if (client_.read_mem(pid, perk_id_arr.Data, PERK_BUF_SIZE, pbuf)) {
                 p.perks_valid = true;
 
-                int best_stride = 0;
-                int best_hits = 0;
-                for (int try_stride : {8, 12, 16, 24}) {
-                    if (try_stride * (int)count > PERK_BUF_SIZE) continue;
-                    int hits = 0;
-                    for (uint32_t i = 0; i < count; i++) {
-                        uint32_t idx = 0;
-                        memcpy(&idx, pbuf + i * try_stride, 4);
-                        if (idx > 0 && idx < 0x200000) {
-                            std::string test = gnames_.resolve(client_, pid, idx);
-                            if (!test.empty() && test != "None" && test[0] != '_')
-                                hits++;
+                int best_stride = perk_stride_;
+                if (best_stride == 0) {
+                    int best_score = -1;
+                    for (int try_stride : {8, 12, 16, 24}) {
+                        if (try_stride * (int)count > PERK_BUF_SIZE) continue;
+                        int hits = 0;
+                        int unique_count = 0;
+                        uint32_t seen_ids[DBD_MAX_PERKS]{};
+                        for (uint32_t i = 0; i < count; i++) {
+                            uint32_t idx = 0;
+                            memcpy(&idx, pbuf + i * try_stride, 4);
+                            if (idx > 0 && idx < 0x200000) {
+                                std::string test = gnames_.resolve(client_, pid, idx);
+                                if (!test.empty() && test != "None" && test[0] != '_') {
+                                    hits++;
+                                    bool dup = false;
+                                    for (int k = 0; k < (int)i; k++) {
+                                        if (seen_ids[k] == idx) { dup = true; break; }
+                                    }
+                                    if (!dup) unique_count++;
+                                }
+                            }
+                            seen_ids[i] = idx;
+                        }
+                        int score = unique_count * 10 + hits;
+                        if (score > best_score || (score == best_score && try_stride > best_stride)) {
+                            best_score = score;
+                            best_stride = try_stride;
                         }
                     }
-                    if (hits > best_hits) {
-                        best_hits = hits;
-                        best_stride = try_stride;
-                    }
+                    if (best_stride == 0) best_stride = 16;
+                    perk_stride_ = best_stride;
                 }
-                if (best_stride == 0) best_stride = 8;
 
                 for (uint32_t i = 0; i < count; i++) {
                     uint32_t comp_idx = 0;

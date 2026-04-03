@@ -10,9 +10,9 @@
 #define DBD_STEAM_GNAMES_OFFSET          0x0BCC7740
 #define DBD_STEAM_GOBJECTS_OFFSET        0x0BDA1D00
 
-#define DBD_EGS_GWORLD_OFFSET            0x0B877140
-#define DBD_EGS_GNAMES_OFFSET            0x0B5EBF40
-#define DBD_EGS_GOBJECTS_OFFSET          0x0B6BF540
+#define DBD_EGS_GWORLD_OFFSET            0xb88e130
+#define DBD_EGS_GNAMES_OFFSET            0xb602f40
+#define DBD_EGS_GOBJECTS_OFFSET          0xb6e5140
 
 #define DBD_PERSISTENT_LEVEL             0x50
 #define DBD_OWNING_GAME_INSTANCE         0x200
@@ -207,7 +207,29 @@ inline const char* DbdMapWeaponToKiller(const std::string& item_name) {
         {"Item_Slasher_Lich",        "Lich"},
         {"Item_Slasher_DarkLord",    "Dark Lord"},
         {"Item_Slasher_Hound",       "Houndmaster"},
-        {"Item_Slasher",             "Killer"},
+        {"Item_Slasher_K20",         "Executioner"},
+        {"Item_Slasher_K21",         "Blight"},
+        {"Item_Slasher_K22",         "Twins"},
+        {"Item_Slasher_K23",         "Trickster"},
+        {"Item_Slasher_K24",         "Nemesis"},
+        {"Item_Slasher_K25",         "Cenobite"},
+        {"Item_Slasher_K26",         "Artist"},
+        {"Item_Slasher_K27",         "Onryo"},
+        {"Item_Slasher_K28",         "Dredge"},
+        {"Item_Slasher_K29",         "Mastermind"},
+        {"Item_Slasher_K30",         "Knight"},
+        {"Item_Slasher_K31",         "Skull Merchant"},
+        {"Item_Slasher_K32",         "Singularity"},
+        {"Item_Slasher_K33",         "Xenomorph"},
+        {"Item_Slasher_K34",         "Good Guy"},
+        {"Item_Slasher_K35",         "Unknown"},
+        {"Item_Slasher_K36",         "Lich"},
+        {"Item_Slasher_K37",         "Dark Lord"},
+        {"Item_Slasher_K38",         "Houndmaster"},
+        {"Item_Slasher_K39",         "Ghoul"},
+        {"Item_Slasher_K40",         "Animatronic"},
+        {"Item_Slasher_K41",         "Krasue"},
+        {"Item_Slasher_K42",         "The First"},
         {"S01_",            "Trapper"},
         {"TW_",             "Wraith"},
         {"Wraith_",         "Wraith"},
@@ -257,6 +279,24 @@ inline const char* DbdMapWeaponToKiller(const std::string& item_name) {
     for (auto& e : weapon_map) {
         if (item_name.find(e.prefix) != std::string::npos)
             return e.killer;
+    }
+
+    {
+        auto pos = item_name.find("_K");
+        while (pos != std::string::npos) {
+            size_t num_start = pos + 2;
+            if (num_start < item_name.size() && item_name[num_start] >= '0' && item_name[num_start] <= '9') {
+                int k_num = 0;
+                size_t j = num_start;
+                while (j < item_name.size() && item_name[j] >= '0' && item_name[j] <= '9') {
+                    k_num = k_num * 10 + (item_name[j] - '0');
+                    j++;
+                }
+                if (k_num >= 1 && k_num <= DBD_KILLER_NAME_COUNT)
+                    return DbdKillerNames[k_num - 1];
+            }
+            pos = item_name.find("_K", pos + 1);
+        }
     }
     return nullptr;
 }
