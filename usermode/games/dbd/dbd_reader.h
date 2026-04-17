@@ -542,7 +542,8 @@ private:
         if (name.find("MeatHook") != std::string::npos ||
             name.find("Hook") != std::string::npos ||
             name.find("Locker") != std::string::npos)           { out = EDbdObjectType::Hook; return true; }
-        if (name.find("Hatch") != std::string::npos)            { out = EDbdObjectType::Hatch; return true; }
+        if (name.find("Hatch") != std::string::npos &&
+            name.find("Hatchet") == std::string::npos)   { out = EDbdObjectType::Hatch; return true; }
         if (name.find("Chest") != std::string::npos ||
             name.find("Searchable") != std::string::npos)       { out = EDbdObjectType::Chest; return true; }
         if (name.find("Window") != std::string::npos)           { out = EDbdObjectType::Window; return true; }
