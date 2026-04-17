@@ -68,6 +68,17 @@
 #define DBD_CHEST_IS_OPENED              0x04A8
 #define DBD_ESCAPE_ACTIVATED             0x0448
 
+#define DBD_INTERACTION_HANDLER          0x0B98
+#define DBD_SKILL_CHECK                  0x0338
+#define DBD_SC_IS_DISPLAYED              0x0190
+#define DBD_SC_CURRENT_PROGRESS          0x0194
+#define DBD_SC_CURRENT_TYPE              0x01C0
+#define DBD_SC_DEFINITION                0x0200
+#define DBD_SC_DEF_SUCCESS_START         0x0000
+#define DBD_SC_DEF_SUCCESS_END           0x0004
+#define DBD_SC_DEF_BONUS_START           0x0008
+#define DBD_SC_DEF_BONUS_END             0x000C
+
 #define DBD_SURVIVOR_HEALTH_COMP         0x18A0
 #define DBD_HEALTH_STATE_COUNT           0x0280
 #define DBD_KILLER_CARRIED_SURVIVOR      0x1A68
@@ -480,6 +491,22 @@ struct DbdAuraConfig {
         {0.82f, 0.41f, 0.12f, 0.5f},
         {0.8f, 0.1f, 0.1f, 0.6f},
     };
+};
+
+struct DbdSkillCheckState {
+    bool     active{};
+    float    progress{};
+    int32_t  type{};
+    float    success_start{};
+    float    success_end{};
+    float    bonus_start{};
+    float    bonus_end{};
+    bool     hit_this_frame{};
+    uint32_t total_hits{};
+};
+
+struct DbdSkillCheckConfig {
+    bool enabled = false;
 };
 
 inline bool DbdIsFiniteVec(const DbdUEVector& v) {

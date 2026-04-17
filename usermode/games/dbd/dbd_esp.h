@@ -99,6 +99,7 @@ struct DbdEspSettings {
     float max_distance  = 200.0f;
 
     bool  show_objects   = true;
+    bool  hide_dull_totems = false;
     float obj_dist[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
         200.0f,  // Generator
         100.0f,  // Totem
@@ -176,6 +177,7 @@ struct DbdEspSettings {
             max_distance,
             show_objects ? "true" : "false",
             show_debug_overlay ? "true" : "false");
+        n += snprintf(buf + n, sizeof(buf) - n, "  \"hide_dull_totems\": %s,\n", hide_dull_totems ? "true" : "false");
         n += snprintf(buf + n, sizeof(buf) - n, "  \"esp_y_offset\": %.1f,\n", esp_y_offset);
         n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_enabled\": %s,\n", aura_enabled ? "true" : "false");
         n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_survivors\": %s,\n", aura_survivors ? "true" : "false");
@@ -226,6 +228,7 @@ struct DbdEspSettings {
         show_objects = gb("show_objects", show_objects);
         show_debug_overlay = gb("show_debug_overlay", show_debug_overlay);
         esp_y_offset = gf("esp_y_offset", esp_y_offset);
+        hide_dull_totems = gb("hide_dull_totems", hide_dull_totems);
         aura_enabled = gb("aura_enabled", aura_enabled);
         aura_survivors = gb("aura_survivors", aura_survivors);
         aura_killer = gb("aura_killer", aura_killer);
@@ -408,6 +411,8 @@ public:
                 if (!settings.obj_show[ti])
                     continue;
                 if (obj.type == EDbdObjectType::Pallet && obj.pallet_state >= 3)
+                    continue;
+                if (obj.type == EDbdObjectType::Totem && settings.hide_dull_totems && obj.totem_state != 2 && obj.totem_state != 3)
                     continue;
                 if (obj.distance > settings.obj_dist[ti] && obj.distance > 0)
                     continue;
@@ -688,6 +693,7 @@ public:
                     ImGui::SliderFloat(sid, &settings.obj_dist[i], 10.0f, 300.0f, "%.0fm");
                 }
             }
+            ImGui::Checkbox("Hide Dull Totems", &settings.hide_dull_totems);
             ImGui::Unindent(10.0f);
         }
 

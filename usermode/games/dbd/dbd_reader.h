@@ -543,19 +543,10 @@ private:
         if (name.find("Window") != std::string::npos)           { out = EDbdObjectType::Window; return true; }
         if (name.find("Trap") != std::string::npos ||
             name.find("BearTrap") != std::string::npos)         { out = EDbdObjectType::Trap; return true; }
-        if (name.find("EscapeDoor") != std::string::npos ||
-            name.find("ExitGate") != std::string::npos ||
-            name.find("DoorEscape") != std::string::npos ||
-            name.find("ExitDoor") != std::string::npos ||
-            name.find("_Escape") != std::string::npos ||
-            name.find("Gate_BP") != std::string::npos)          { out = EDbdObjectType::EscapeDoor; return true; }
+        if (name.find("_Escape") != std::string::npos)          { out = EDbdObjectType::EscapeDoor; return true; }
         if (name.find("BreakableWall") != std::string::npos ||
             name.find("Breakable") != std::string::npos)        { out = EDbdObjectType::BreakableDoor; return true; }
-        if (name.find("BloodPump") != std::string::npos ||
-            name.find("Blood_Pump") != std::string::npos ||
-            name.find("BloodDispenser") != std::string::npos ||
-            name.find("FuelPump") != std::string::npos ||
-            name.find("JerryCan") != std::string::npos ||
+        if (name.find("FuelPump") != std::string::npos ||
             name.find("EventInteract") != std::string::npos)    { out = EDbdObjectType::BloodPump; return true; }
         return false;
     }

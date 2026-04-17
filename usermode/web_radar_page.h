@@ -59,6 +59,7 @@ label.toggle input{accent-color:#2ecc71}
         <div class="section-title">Show Objects</div>
         <label class="toggle"><input type="checkbox" data-obj="Generator" checked>Generators</label>
         <label class="toggle"><input type="checkbox" data-obj="Totem" checked>Totems</label>
+        <label class="toggle" style="padding-left:16px"><input type="checkbox" id="hide-dull">Hide Dull</label>
         <label class="toggle"><input type="checkbox" data-obj="Pallet" checked>Pallets</label>
         <label class="toggle"><input type="checkbox" data-obj="Hook" checked>Hooks</label>
         <label class="toggle"><input type="checkbox" data-obj="Hatch" checked>Hatch</label>
@@ -67,6 +68,7 @@ label.toggle input{accent-color:#2ecc71}
         <label class="toggle"><input type="checkbox" data-obj="Window">Windows</label>
         <label class="toggle"><input type="checkbox" data-obj="Trap" checked>Traps</label>
         <label class="toggle"><input type="checkbox" data-obj="Breakable">Breakable Walls</label>
+        <label class="toggle"><input type="checkbox" data-obj="Event" checked>Event</label>
     </div>
     <div class="section">
         <div class="section-title">Players</div>
@@ -103,6 +105,9 @@ document.querySelectorAll('[data-obj]').forEach(cb => {
     objFilters[cb.dataset.obj] = cb.checked;
     cb.addEventListener('change', () => { objFilters[cb.dataset.obj] = cb.checked; });
 });
+
+let hideDull = false;
+document.getElementById('hide-dull').addEventListener('change', (e) => { hideDull = e.target.checked; });
 
 function syncZoom(v) {
     zoom = Math.max(0.2, Math.min(5, v));
@@ -246,14 +251,14 @@ const OBJ_COLORS = {
     'Generator': '#ffd700', 'Totem': '#ff69b4', 'Pallet': '#00ced1',
     'Hook': '#ff4500', 'Hatch': '#9400d3', 'Chest': '#daa520',
     'Window': '#87ceeb', 'Trap': '#dc143c', 'Exit Gate': '#32cd32',
-    'Breakable': '#d2691e', 'Locker': '#808080'
+    'Breakable': '#d2691e', 'Locker': '#808080', 'Event': '#ff32dc'
 };
 
 const OBJ_SYMBOLS = {
     'Generator': '\u26A1', 'Totem': '\u2726', 'Pallet': '\u2588',
     'Hook': '\u2620', 'Hatch': '\u25C6', 'Chest': '\u25A0',
     'Window': '\u25AF', 'Trap': '\u25B2', 'Exit Gate': '\u25CE',
-    'Breakable': '\u2502', 'Locker': '\u25A3'
+    'Breakable': '\u2502', 'Locker': '\u25A3', 'Event': '\u2605'
 };
 
 function render() {
@@ -321,21 +326,36 @@ function render() {
     if (state.objects) {
         state.objects.forEach(o => {
             if (!objFilters[o.type]) return;
+            if (o.type === 'Totem' && hideDull && o.state !== 2 && o.state !== 3) return;
             const sp = toScreen(o.x, o.y);
             if (sp.x < -20 || sp.x > w+20 || sp.y < -20 || sp.y > h+20) return;
 
             const col = OBJ_COLORS[o.type] || '#888';
-            ctx.fillStyle = col;
+            let drawCol = col;
             ctx.font = '14px sans-serif';
             ctx.textAlign = 'center';
+
+            if (o.type === 'Totem' && o.state === 2) {
+                drawCol = '#ff3333';
+            } else if (o.type === 'Totem' && o.state === 3) {
+                drawCol = '#66b3ff';
+            } else if (o.type === 'Totem') {
+                drawCol = '#ff69b466';
+            }
+
+            ctx.fillStyle = drawCol;
             ctx.fillText(OBJ_SYMBOLS[o.type] || '?', sp.x, sp.y + 5);
 
             ctx.font = '9px sans-serif';
-            ctx.fillStyle = col + 'aa';
+            ctx.fillStyle = drawCol + (drawCol.length <= 7 ? 'aa' : '');
             let label = o.type;
             if (o.type === 'Generator' && o.progress !== undefined) {
                 label = 'Gen ' + o.progress.toFixed(0) + '%';
                 if (o.progress >= 99.5) { label = 'Gen DONE'; ctx.fillStyle = '#2f2'; }
+            } else if (o.type === 'Totem') {
+                if (o.state === 2) { label = 'HEX'; ctx.fillStyle = '#ff3333'; }
+                else if (o.state === 3) { label = 'Boon'; ctx.fillStyle = '#66b3ff'; }
+                else { label = 'Dull'; }
             }
             ctx.fillText(label, sp.x, sp.y + 18);
         });
