@@ -503,6 +503,15 @@ struct DbdSkillCheckState {
     float    bonus_end{};
     bool     hit_this_frame{};
     uint32_t total_hits{};
+    // Debug chain
+    uint64_t debug_handler{};
+    uint64_t debug_skillcheck{};
+    uint8_t  debug_displayed_raw{};
+    char     debug_fail[32]{};
+    // Debug: raw floats
+    static constexpr int DEBUG_FLOAT_COUNT = 32;
+    float    debug_floats[DEBUG_FLOAT_COUNT]{};
+    float    debug_def_floats[8]{};
 };
 
 struct DbdSkillCheckConfig {

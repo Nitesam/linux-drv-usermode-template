@@ -68,6 +68,7 @@ struct DbdWorldState {
     std::vector<DbdObjectData> objects{};
     std::string error{};
     DbdDebugState debug{};
+    DbdSkillCheckState skillcheck{};
 };
 
 class DbdReader {
@@ -91,7 +92,8 @@ public:
         return true;
     }
 
-    DbdWorldState update(int pid, uint64_t base_address, const DbdAuraConfig* aura_cfg = nullptr) {
+    DbdWorldState update(int pid, uint64_t base_address, const DbdAuraConfig* aura_cfg = nullptr,
+                         const DbdSkillCheckConfig* sc_cfg = nullptr) {
         DbdWorldState state{};
         state.base_address = base_address;
         ++cycle_;
@@ -235,6 +237,9 @@ public:
                 obj.distance = DbdVectorDistance(obj.position, state.camera.Location) / 100.0f;
             }
         }
+
+        if (local_pawn != 0)
+            read_and_handle_skillcheck(pid, local_pawn, state);
 
         state.player_count = static_cast<int32_t>(state.players.size());
         state.valid = true;
@@ -1110,6 +1115,71 @@ private:
         if (found >= 8) {
             p.bones_mapped = true;
             bone_mapped_addrs_.insert(mesh_comp);
+        }
+    }
+
+    void read_and_handle_skillcheck(int pid, uint64_t local_pawn, DbdWorldState& state) {
+        auto& sc = state.skillcheck;
+        sc = {};
+
+        uint64_t handler = 0;
+
+        unsigned char hbuf[8]{};
+        client_.read_mem(pid, local_pawn + DBD_INTERACTION_HANDLER, 8, hbuf);
+        memcpy(&handler, hbuf, 8);
+        sc.debug_handler = handler;
+
+        if (!DbdIsLikelyPointer(handler)) {
+            snprintf(sc.debug_fail, sizeof(sc.debug_fail), "handler=0x%lX", handler);
+            return;
+        }
+
+        uint64_t skill_check = 0;
+        unsigned char sbuf[8]{};
+        client_.read_mem(pid, handler + DBD_SKILL_CHECK, 8, sbuf);
+        memcpy(&skill_check, sbuf, 8);
+        sc.debug_skillcheck = skill_check;
+
+        if (!DbdIsLikelyPointer(skill_check)) {
+            snprintf(sc.debug_fail, sizeof(sc.debug_fail), "sc=0x%lX", skill_check);
+            return;
+        }
+
+        uint8_t displayed = 0;
+        read_val(pid, skill_check + DBD_SC_IS_DISPLAYED, displayed);
+        sc.debug_displayed_raw = displayed;
+
+        if (!displayed) {
+            snprintf(sc.debug_fail, sizeof(sc.debug_fail), "displayed=%d", displayed);
+            return;
+        }
+
+        sc.active = true;
+        read_val(pid, skill_check + DBD_SC_CURRENT_PROGRESS, sc.progress);
+        read_val(pid, skill_check + DBD_SC_CURRENT_TYPE, sc.type);
+
+        // Dump raw floats from sc+0x190 for debug
+        for (int i = 0; i < DbdSkillCheckState::DEBUG_FLOAT_COUNT; i++)
+            read_val(pid, skill_check + 0x190 + i * 4, sc.debug_floats[i]);
+
+        // Definition is inline at sc+0x200
+        // Read floats from definition for debug
+        uint64_t def = skill_check + DBD_SC_DEFINITION;
+        for (int i = 0; i < 8; i++)
+            read_val(pid, def + i * 4, sc.debug_def_floats[i]);
+
+        // Try standard layout: +0x00=successStart, +0x04=successEnd, +0x08=bonusLen, +0x0C=bonusStart
+        sc.success_start = sc.debug_def_floats[0];
+        sc.success_end   = sc.debug_def_floats[1];
+        sc.bonus_start   = sc.debug_def_floats[3]; // +0x0C = bonusStart (absolute position)
+        sc.bonus_end     = sc.debug_def_floats[2]; // +0x08 = bonusLength
+
+        // Check: is currentProgress inside the bonus (great) zone?
+        float b_start = sc.bonus_start;
+        float b_end   = sc.bonus_start + sc.bonus_end; // start + length
+
+        if (sc.progress >= b_start && sc.progress <= b_end) {
+            sc.hit_this_frame = true;
         }
     }
 };

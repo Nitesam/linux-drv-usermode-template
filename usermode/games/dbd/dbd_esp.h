@@ -121,6 +121,7 @@ struct DbdEspSettings {
 
     bool  show_debug_overlay = false;
     float esp_y_offset = 0.0f;
+    bool  auto_skillcheck = false;
 
     bool  aura_enabled = false;
     bool  aura_survivors = true;
@@ -159,6 +160,12 @@ struct DbdEspSettings {
         return cfg;
     }
 
+    DbdSkillCheckConfig get_skillcheck_config() const {
+        DbdSkillCheckConfig cfg;
+        cfg.enabled = auto_skillcheck;
+        return cfg;
+    }
+
     std::string to_json() const {
         char buf[8192];
         int n = snprintf(buf, sizeof(buf),
@@ -179,6 +186,7 @@ struct DbdEspSettings {
             show_debug_overlay ? "true" : "false");
         n += snprintf(buf + n, sizeof(buf) - n, "  \"hide_dull_totems\": %s,\n", hide_dull_totems ? "true" : "false");
         n += snprintf(buf + n, sizeof(buf) - n, "  \"esp_y_offset\": %.1f,\n", esp_y_offset);
+        n += snprintf(buf + n, sizeof(buf) - n, "  \"auto_skillcheck\": %s,\n", auto_skillcheck ? "true" : "false");
         n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_enabled\": %s,\n", aura_enabled ? "true" : "false");
         n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_survivors\": %s,\n", aura_survivors ? "true" : "false");
         n += snprintf(buf + n, sizeof(buf) - n, "  \"aura_killer\": %s,\n", aura_killer ? "true" : "false");
@@ -229,6 +237,7 @@ struct DbdEspSettings {
         show_debug_overlay = gb("show_debug_overlay", show_debug_overlay);
         esp_y_offset = gf("esp_y_offset", esp_y_offset);
         hide_dull_totems = gb("hide_dull_totems", hide_dull_totems);
+        auto_skillcheck = gb("auto_skillcheck", auto_skillcheck);
         aura_enabled = gb("aura_enabled", aura_enabled);
         aura_survivors = gb("aura_survivors", aura_survivors);
         aura_killer = gb("aura_killer", aura_killer);
@@ -735,6 +744,17 @@ public:
                         ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
                 }
             }
+            ImGui::Unindent(10.0f);
+        }
+
+        ImGui::Separator();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 1.0f, 0.5f, 1.0f));
+        ImGui::Checkbox("Auto Great Skill Check", &settings.auto_skillcheck);
+        ImGui::PopStyleColor();
+        if (settings.auto_skillcheck) {
+            ImGui::Indent(10.0f);
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 0.8f),
+                "Simulates spacebar when needle is in great zone");
             ImGui::Unindent(10.0f);
         }
     }

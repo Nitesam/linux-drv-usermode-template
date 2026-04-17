@@ -7,6 +7,9 @@
 
 #include "imgui.h"
 
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+
 class DbdModule : public GameModule {
 public:
     DbdModule() = default;
@@ -22,7 +25,24 @@ public:
         if (!reader_)
             reader_ = std::make_unique<DbdReader>(client);
         DbdAuraConfig aura_cfg = esp_.settings.get_aura_config();
-        state_ = reader_->update(pid, base, &aura_cfg);
+        DbdSkillCheckConfig sc_cfg = esp_.settings.get_skillcheck_config();
+        state_ = reader_->update(pid, base, &aura_cfg, &sc_cfg);
+
+        // Always track skill check state for debug
+        if (state_.skillcheck.active)
+            sc_last_sc_ = state_.skillcheck;
+
+        // Auto great skill check: simulate spacebar when in great zone
+        if (sc_cfg.enabled && state_.skillcheck.active && state_.skillcheck.hit_this_frame) {
+            if (!sc_space_pressed_) {
+                simulate_space_press();
+                sc_space_pressed_ = true;
+                sc_hits_++;
+            }
+        }
+        if (!state_.skillcheck.active || !state_.skillcheck.hit_this_frame)
+            sc_space_pressed_ = false;
+        state_.skillcheck.total_hits = sc_hits_;
     }
 
     bool is_valid()     override { return state_.valid; }
@@ -281,6 +301,58 @@ public:
             for (int i = 0; i < d.unknown_actor_count; i++)
                 ImGui::TextColored(warn, "  %s", d.unknown_actors[i]);
         }
+
+        if (ImGui::CollapsingHeader("Skill Check", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& sc_live = state_.skillcheck;
+            auto& sc = sc_last_sc_;
+
+            // Always show live chain status
+            ImGui::TextColored(dim, "Chain (live):");
+            ImGui::TextColored(dim, "  Handler:    0x%lX", sc_live.debug_handler);
+            ImGui::TextColored(dim, "  SkillCheck: 0x%lX", sc_live.debug_skillcheck);
+            ImGui::TextColored(dim, "  Displayed:  %d", sc_live.debug_displayed_raw);
+            if (sc_live.debug_fail[0])
+                ImGui::TextColored(fail, "  FAIL: %s", sc_live.debug_fail);
+
+            if (sc_live.active)
+                ImGui::TextColored(ok, "LIVE (frame %u)", sc_active_frames_);
+            else if (sc.active)
+                ImGui::TextColored(warn, "LAST SEEN (frozen)");
+            else
+                ImGui::TextColored(dim, "No skill check seen yet");
+
+            if (sc.active) {
+                ImGui::TextColored(white, "Progress: %.4f  Type: %d", sc.progress, sc.type);
+                ImGui::TextColored(ok, "Hits: %u", sc_hits_);
+
+                ImGui::Separator();
+                ImGui::TextColored(warn, "Definition (sc+0x200):");
+                const char* def_names[] = {
+                    "successStart", "successLen", "bonusStart", "bonusLen",
+                    "progressRate", "startTicker", "def[6]", "def[7]"
+                };
+                for (int i = 0; i < 8; i++) {
+                    float v = sc.debug_def_floats[i];
+                    ImVec4 col = (std::isfinite(v) && v > 0.0f && v < 2.0f) ? warn : dim;
+                    ImGui::TextColored(col, "  +0x%02X %-14s = %.6f", i*4, def_names[i], v);
+                }
+
+                float b_end = sc.bonus_start + sc.bonus_end;
+                ImGui::TextColored(ok, "Great zone: %.4f - %.4f", sc.bonus_start, b_end);
+                bool in_zone = sc.progress >= sc.bonus_start && sc.progress <= b_end;
+                ImGui::TextColored(in_zone ? ok : dim, "In zone: %s", in_zone ? "YES" : "no");
+
+                if (ImGui::TreeNode("Raw sc+0x190...")) {
+                    for (int i = 0; i < DbdSkillCheckState::DEBUG_FLOAT_COUNT; i++) {
+                        uint32_t off = 0x190 + i * 4;
+                        float v = sc.debug_floats[i];
+                        ImVec4 col = (std::isfinite(v) && v > 0.0f && v < 1.0f) ? warn : dim;
+                        ImGui::TextColored(col, "  sc+0x%03X = %.6f", off, v);
+                    }
+                    ImGui::TreePop();
+                }
+            }
+        }
     }
 
     std::string to_json() override {
@@ -427,6 +499,40 @@ private:
     static inline DbdEspRenderer esp_{};
     static inline std::unordered_set<uint64_t> pinned_players_{};
     static inline bool auto_pin_killer_ = true;
+    bool sc_space_pressed_ = false;
+    uint32_t sc_hits_ = 0;
+    uint32_t sc_active_frames_ = 0;
+    DbdSkillCheckState sc_last_sc_{};
+
+    void simulate_space_press() {
+        Display* dpy = XOpenDisplay(nullptr);
+        if (!dpy) return;
+
+        Window focused = 0;
+        int revert = 0;
+        XGetInputFocus(dpy, &focused, &revert);
+        if (!focused) { XCloseDisplay(dpy); return; }
+
+        KeyCode space = XKeysymToKeycode(dpy, XK_space);
+
+        XKeyEvent ev{};
+        ev.type = KeyPress;
+        ev.display = dpy;
+        ev.window = focused;
+        ev.root = DefaultRootWindow(dpy);
+        ev.subwindow = None;
+        ev.time = CurrentTime;
+        ev.keycode = space;
+        ev.same_screen = True;
+
+        XSendEvent(dpy, focused, True, KeyPressMask, reinterpret_cast<XEvent*>(&ev));
+
+        ev.type = KeyRelease;
+        XSendEvent(dpy, focused, True, KeyReleaseMask, reinterpret_cast<XEvent*>(&ev));
+
+        XFlush(dpy);
+        XCloseDisplay(dpy);
+    }
 };
 
 #endif
