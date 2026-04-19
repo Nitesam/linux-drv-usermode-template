@@ -9,6 +9,15 @@ driver/modules.order
 driver/.*.cmd
 driver/.tmp_versions/
 
+build_codex
+build_codex_verify
+
+Code
+out
+
+SDK
+FNames.txt
+
 # Build artifacts - usermode
 usermode/build/
 usermode/imgui/

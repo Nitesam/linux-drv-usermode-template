@@ -4,8 +4,9 @@ project(gsd-housekeeping LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Output binary
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY /root/NTS_WORK)
+if(NOT DEFINED CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY /root/NTS_WORK)
+endif()
 
 # ── Find dependencies ────────────────────────────────────────────
 find_package(OpenGL REQUIRED)
@@ -38,6 +39,7 @@ target_include_directories(gsd-housekeeping PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared
     ${CMAKE_CURRENT_SOURCE_DIR}/games/hll
     ${CMAKE_CURRENT_SOURCE_DIR}/games/dbd
+    ${CMAKE_CURRENT_SOURCE_DIR}/games/sot
 )
 
 target_link_libraries(gsd-housekeeping PRIVATE

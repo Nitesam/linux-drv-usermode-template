@@ -121,7 +121,7 @@ static int try_find_pid(MemClient& client, GameModule* game)
         pid = client.find_pid(name);
         if (pid > 0) return pid;
     }
-    return -1;
+    return game->find_pid_fallback();
 }
 
 static void reader_thread_func()
@@ -137,17 +137,16 @@ static void reader_thread_func()
         local_game->update(g_client, g_target_pid, g_base_address);
 
         std::string json = local_game->to_json();
+        auto render_snapshot = local_game->clone_for_render();
 
         {
             std::unique_lock<std::shared_mutex> wlock(g_state_rwlock);
-            g_shared_state = std::move(local_game);
+            g_shared_state = std::move(render_snapshot);
         }
         {
             std::lock_guard<std::mutex> jlk(g_json_mtx);
             g_cached_json = std::move(json);
         }
-
-        local_game = create_game();
     }
 }
 
