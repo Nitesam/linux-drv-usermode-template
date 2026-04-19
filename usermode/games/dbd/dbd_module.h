@@ -28,12 +28,13 @@ public:
         DbdSkillCheckConfig sc_cfg = esp_.settings.get_skillcheck_config();
         state_ = reader_->update(pid, base, &aura_cfg, &sc_cfg);
 
-        // Always track skill check state for debug
         if (state_.skillcheck.active)
             sc_last_sc_ = state_.skillcheck;
 
-        // Auto great skill check: simulate spacebar when in great zone
-        if (sc_cfg.enabled && state_.skillcheck.active && state_.skillcheck.hit_this_frame) {
+        bool is_normal_sc = state_.skillcheck.active
+                         && state_.skillcheck.hit_this_frame
+                         && state_.skillcheck.type != 11;
+        if (sc_cfg.enabled && is_normal_sc) {
             if (!sc_space_pressed_) {
                 simulate_space_press();
                 sc_space_pressed_ = true;
