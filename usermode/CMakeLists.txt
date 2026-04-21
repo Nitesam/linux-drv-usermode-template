@@ -40,6 +40,7 @@ target_include_directories(gsd-housekeeping PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/games/hll
     ${CMAKE_CURRENT_SOURCE_DIR}/games/dbd
     ${CMAKE_CURRENT_SOURCE_DIR}/games/sot
+    ${CMAKE_CURRENT_SOURCE_DIR}/games/tfinals
 )
 
 target_link_libraries(gsd-housekeeping PRIVATE

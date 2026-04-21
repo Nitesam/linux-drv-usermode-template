@@ -9,8 +9,11 @@ driver/modules.order
 driver/.*.cmd
 driver/.tmp_versions/
 
+build
 build_codex
 build_codex_verify
+
+Finals_SDK
 
 Code
 out
