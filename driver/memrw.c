@@ -397,48 +397,247 @@ static ssize_t do_mem_write(pid_t pid, unsigned long addr,
     return bytes > 0 ? bytes : -EIO;
 }
 
-static int do_find_pid_by_name(const char *name)
+static char ascii_lower_char(char c)
 {
-    struct task_struct *task;
-    int found_pid = -1;
-    size_t name_len = strlen(name);
+    return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+}
 
-    rcu_read_lock();
-    for_each_process(task) {
-        const char *comm = task->comm;
-        size_t comm_len = strlen(comm);
-        if (comm_len == name_len) {
-            bool match = true;
-            size_t i;
-            for (i = 0; i < comm_len; ++i) {
-                char a = comm[i];
-                char b = name[i];
-                if (a >= 'A' && a <= 'Z') a += 32;
-                if (b >= 'A' && b <= 'Z') b += 32;
-                if (a != b) { match = false; break; }
-            }
-            if (match) {
-                found_pid = task->pid;
-                break;
-            }
+static bool str_case_equal(const char *a, const char *b)
+{
+    if (!a || !b)
+        return false;
+
+    while (*a && *b) {
+        if (ascii_lower_char(*a) != ascii_lower_char(*b))
+            return false;
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool str_case_prefix_equal(const char *a, const char *b, size_t len)
+{
+    size_t i;
+
+    if (!a || !b)
+        return false;
+
+    for (i = 0; i < len; ++i) {
+        if (ascii_lower_char(a[i]) != ascii_lower_char(b[i]))
+            return false;
+    }
+    return true;
+}
+
+static const char *basename_ptr_kernel(const char *path)
+{
+    const char *base = path;
+    const char *p;
+
+    if (!path)
+        return "";
+
+    for (p = path; *p; ++p) {
+        if (*p == '/' || *p == '\\')
+            base = p + 1;
+    }
+    return base;
+}
+
+static bool process_name_matches(const char *candidate, const char *name)
+{
+    size_t candidate_len;
+    size_t name_len;
+
+    if (!candidate || !name || name[0] == '\0')
+        return false;
+
+    candidate_len = strlen(candidate);
+    name_len = strlen(name);
+
+    if (candidate_len == name_len && str_case_equal(candidate, name))
+        return true;
+
+    if (name_len > 15 && candidate_len == 15 &&
+        str_case_prefix_equal(candidate, name, 15))
+        return true;
+
+    return false;
+}
+
+static bool cmdline_arg_matches(const char *arg, const char *name)
+{
+    const char *base;
+
+    if (!arg || arg[0] == '\0')
+        return false;
+
+    base = basename_ptr_kernel(arg);
+    return process_name_matches(base, name);
+}
+
+static bool path_matches_process_name(const char *path, const char *name)
+{
+    const char *base;
+
+    if (!path || path[0] == '\0')
+        return false;
+
+    base = basename_ptr_kernel(path);
+    return process_name_matches(base, name);
+}
+
+static bool task_cmdline_matches_name(struct task_struct *task, const char *name)
+{
+    struct mm_struct *mm;
+    unsigned long arg_start;
+    unsigned long arg_end;
+    unsigned long len;
+    ssize_t bytes;
+    char *buf;
+    size_t pos = 0;
+    bool matched = false;
+
+    mm = get_task_mm(task);
+    if (!mm)
+        return false;
+
+    mmap_read_lock(mm);
+    arg_start = mm->arg_start;
+    arg_end = mm->arg_end;
+    mmap_read_unlock(mm);
+
+    if (arg_end <= arg_start) {
+        mmput(mm);
+        return false;
+    }
+
+    len = arg_end - arg_start;
+    if (len > 32768)
+        len = 32768;
+
+    buf = kzalloc(len + 1, GFP_KERNEL);
+    if (!buf) {
+        mmput(mm);
+        return false;
+    }
+
+    bytes = access_process_vm(task, arg_start, buf, len, FOLL_FORCE);
+    if (bytes <= 0)
+        goto out;
+
+    buf[bytes] = '\0';
+    while (pos < bytes) {
+        char *arg = buf + pos;
+        size_t remaining = bytes - pos;
+        size_t arg_len = strnlen(arg, remaining);
+
+        if (arg_len > 0 && cmdline_arg_matches(arg, name)) {
+            matched = true;
+            break;
         }
-        if (name_len > 15 && comm_len == 15) {
-            bool match = true;
-            size_t i;
-            for (i = 0; i < 15; ++i) {
-                char a = comm[i];
-                char b = name[i];
-                if (a >= 'A' && a <= 'Z') a += 32;
-                if (b >= 'A' && b <= 'Z') b += 32;
-                if (a != b) { match = false; break; }
-            }
-            if (match) {
-                found_pid = task->pid;
+
+        pos += arg_len + 1;
+    }
+
+out:
+    kfree(buf);
+    mmput(mm);
+    return matched;
+}
+
+static bool task_vma_matches_name(struct task_struct *task, const char *name)
+{
+    struct mm_struct *mm;
+    struct vm_area_struct *vma;
+    struct vma_iterator vmi;
+    bool matched = false;
+
+    mm = get_task_mm(task);
+    if (!mm)
+        return false;
+
+    mmap_read_lock(mm);
+
+    vma_iter_init(&vmi, mm, 0);
+    for_each_vma(vmi, vma) {
+        if (vma->vm_file) {
+            char buf[512];
+            char *p = d_path(&vma->vm_file->f_path, buf, sizeof(buf));
+            if (!IS_ERR(p) && path_matches_process_name(p, name)) {
+                matched = true;
                 break;
             }
         }
     }
+
+    mmap_read_unlock(mm);
+    mmput(mm);
+    return matched;
+}
+
+static bool task_matches_name_by_pid(pid_t pid, const char *name)
+{
+    struct pid *pid_struct;
+    struct task_struct *task;
+    bool matched = false;
+
+    pid_struct = find_get_pid(pid);
+    if (!pid_struct)
+        return false;
+
+    rcu_read_lock();
+    task = pid_task(pid_struct, PIDTYPE_PID);
+    if (!task) {
+        rcu_read_unlock();
+        put_pid(pid_struct);
+        return false;
+    }
+    get_task_struct(task);
     rcu_read_unlock();
+
+    if (process_name_matches(task->comm, name) ||
+        task_cmdline_matches_name(task, name) ||
+        task_vma_matches_name(task, name))
+        matched = true;
+
+    put_task_struct(task);
+    put_pid(pid_struct);
+    return matched;
+}
+
+static int do_find_pid_by_name(const char *name)
+{
+    struct task_struct *task;
+    pid_t *pids;
+    int pid_count = 0;
+    int i;
+    int found_pid = -1;
+
+    if (!name || name[0] == '\0')
+        return -1;
+
+    pids = kcalloc(4096, sizeof(*pids), GFP_KERNEL);
+    if (!pids)
+        return -1;
+
+    rcu_read_lock();
+    for_each_process(task) {
+        if (pid_count >= 4096)
+            break;
+        pids[pid_count++] = task->pid;
+    }
+    rcu_read_unlock();
+
+    for (i = 0; i < pid_count; ++i) {
+        if (task_matches_name_by_pid(pids[i], name)) {
+            found_pid = pids[i];
+            break;
+        }
+    }
+
+    kfree(pids);
     return found_pid;
 }
 
@@ -478,9 +677,9 @@ static unsigned long do_get_base_address(pid_t pid, const char *name)
         vma_iter_init(&vmi, mm, 0);
         for_each_vma(vmi, vma) {
             if (vma->vm_file) {
-                char buf[256];
+                char buf[512];
                 char *p = d_path(&vma->vm_file->f_path, buf, sizeof(buf));
-                if (!IS_ERR(p) && strstr(p, name)) {
+                if (!IS_ERR(p) && path_matches_process_name(p, name)) {
                     result = vma->vm_start;
                     break;
                 }
