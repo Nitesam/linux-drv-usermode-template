@@ -69,6 +69,8 @@ static std::vector<ScreenInfo> g_screens;
 static int                     g_selected_screen = 0;
 static int                     g_screen_width  = 1920;
 static int                     g_screen_height = 1080;
+static int                     g_render_width  = 1920;
+static int                     g_render_height = 1080;
 
 static Display *g_x11_dpy = nullptr;
 static Window   g_x11_win = 0;
@@ -116,11 +118,23 @@ static void poll_global_hotkey()
 static int try_find_pid(MemClient& client, GameModule* game)
 {
     int pid = client.find_pid(game->process_name());
-    if (pid > 0) return pid;
+    if (pid > 0) {
+        LOG_INFO("Found %s with driver name '%s': PID %d",
+                 game->game_name(), game->process_name(), pid);
+        return pid;
+    }
+    LOG_DBG("Driver PID lookup missed '%s'", game->process_name());
+
     for (auto name : game->alt_process_names()) {
         pid = client.find_pid(name);
-        if (pid > 0) return pid;
+        if (pid > 0) {
+            LOG_INFO("Found %s with driver alias '%s': PID %d",
+                     game->game_name(), name, pid);
+            return pid;
+        }
+        LOG_DBG("Driver PID lookup missed '%s'", name);
     }
+
     return game->find_pid_fallback();
 }
 
@@ -400,6 +414,17 @@ int main(int argc, char **argv)
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0))       { g_ui_scale = 1.0f; }
         io.FontGlobalScale = g_ui_scale;
 
+        int draw_w = static_cast<int>(io.DisplaySize.x);
+        int draw_h = static_cast<int>(io.DisplaySize.y);
+        if (draw_w <= 0 || draw_h <= 0)
+            glfwGetWindowSize(window, &draw_w, &draw_h);
+        if (draw_w <= 0 || draw_h <= 0) {
+            draw_w = g_screen_width;
+            draw_h = g_screen_height;
+        }
+        g_render_width = draw_w;
+        g_render_height = draw_h;
+
         std::shared_ptr<GameModule> render_game;
         {
             std::shared_lock<std::shared_mutex> rlock(g_state_rwlock);
@@ -409,7 +434,7 @@ int main(int argc, char **argv)
             render_game = create_game();
 
         ImDrawList* fg = ImGui::GetForegroundDrawList();
-        render_game->render_esp(fg, g_screen_width, g_screen_height);
+        render_game->render_esp(fg, g_render_width, g_render_height);
 
         g_frame_count++;
         auto now_fps = std::chrono::steady_clock::now();
@@ -421,12 +446,12 @@ int main(int argc, char **argv)
         }
         char fps_buf[32];
         snprintf(fps_buf, sizeof(fps_buf), "%.0f FPS", g_fps);
-        fg->AddText(ImVec2(g_screen_width - 80.0f, 5.0f), IM_COL32(180, 180, 180, 180), fps_buf);
+        fg->AddText(ImVec2(g_render_width - 80.0f, 5.0f), IM_COL32(180, 180, 180, 180), fps_buf);
 
         if (g_ui_visible) {
             ImVec2 win_size(1100 * g_ui_scale, 800 * g_ui_scale);
-            ImGui::SetNextWindowPos(ImVec2((g_screen_width - win_size.x) * 0.5f,
-                                           (g_screen_height - win_size.y) * 0.5f), ImGuiCond_Always);
+            ImGui::SetNextWindowPos(ImVec2((g_render_width - win_size.x) * 0.5f,
+                                           (g_render_height - win_size.y) * 0.5f), ImGuiCond_Always);
             ImGui::SetNextWindowSize(win_size, ImGuiCond_Always);
             ImGui::Begin("##MainPanel", &g_ui_visible,
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
@@ -441,7 +466,7 @@ int main(int argc, char **argv)
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.65f, 1.0f),
                     "PID: %d | Players: %d | Screen: %dx%d",
                     g_target_pid, render_game->player_count(),
-                    g_screen_width, g_screen_height);
+                    g_render_width, g_render_height);
             else
                 ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "NOT FOUND");
 
@@ -532,6 +557,11 @@ int main(int argc, char **argv)
                                     const auto& scr = g_screens[i];
                                     glfwSetWindowPos(window, scr.x, scr.y);
                                     glfwSetWindowSize(window, scr.width, scr.height);
+                                    if (g_x11_dpy && g_x11_win) {
+                                        XMoveResizeWindow(g_x11_dpy, g_x11_win, scr.x, scr.y,
+                                                          scr.width, scr.height);
+                                        XFlush(g_x11_dpy);
+                                    }
                                     LOG_INFO("Selected screen %d: %s (%dx%d)",
                                              i, g_screens[i].label.c_str(),
                                              g_screen_width, g_screen_height);
@@ -543,7 +573,8 @@ int main(int argc, char **argv)
                     } else {
                         ImGui::Text("Monitor: %s", g_screens.empty() ? "Default" : g_screens[0].label.c_str());
                     }
-                    ImGui::Text("Resolution: %d x %d", g_screen_width, g_screen_height);
+                    ImGui::Text("Monitor mode: %d x %d", g_screen_width, g_screen_height);
+                    ImGui::Text("Render surface: %d x %d", g_render_width, g_render_height);
 
                     ImGui::SeparatorText("Status");
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", g_status_msg.c_str());

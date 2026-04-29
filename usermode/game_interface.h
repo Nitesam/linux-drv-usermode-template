@@ -3,6 +3,7 @@
 
 #include <string>
 #include <memory>
+#include <vector>
 #include "mem_client.h"
 
 struct ImDrawList;
