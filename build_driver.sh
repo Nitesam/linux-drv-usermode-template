@@ -13,13 +13,19 @@ echo "  ✓ Built memrw.ko"
 
 echo "[2/4] Signing..."
 MOK_DIR="$OUTPUT_DIR/mok"
-if [ -f "$MOK_DIR/signing_key.priv" ] && [ -f "$MOK_DIR/signing_key_pub.der" ]; then
+PUB_KEY="$MOK_DIR/signing_key_pub.der"
+
+PRIV_KEY=$(ls "$MOK_DIR"/*.priv "$MOK_DIR"/*.pem "$MOK_DIR"/*.key 2>/dev/null | head -n 1)
+
+if [ -n "$PRIV_KEY" ] && [ -f "$PUB_KEY" ]; then
+    echo "    Using private key: $PRIV_KEY"
     /usr/src/kernels/$(uname -r)/scripts/sign-file sha256 \
-        "$MOK_DIR/signing_key.priv" "$MOK_DIR/signing_key_pub.der" \
+        "$PRIV_KEY" "$PUB_KEY" \
         "$OUTPUT_DIR/memrw.ko"
     echo "  ✓ Signed"
 else
-    echo "  ⚠ MOK keys not found, skipping signing"
+    echo "  ⚠ MOK keys not found in $MOK_DIR, skipping signing"
+    exit 1
 fi
 
 echo "[3/4] Unloading old module..."

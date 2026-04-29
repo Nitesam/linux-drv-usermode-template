@@ -73,6 +73,146 @@ inline bool IsOnScreen(const ScreenPoint& sp, const ScreenSize& ss) {
 
 }
 
+inline DbdUEVector DbdTransformPoint(const DbdFTransform& t, const DbdUEVector& local) {
+    double x = local.X * ((std::isfinite(t.ScaleX) && std::abs(t.ScaleX) > 0.001) ? t.ScaleX : 1.0);
+    double y = local.Y * ((std::isfinite(t.ScaleY) && std::abs(t.ScaleY) > 0.001) ? t.ScaleY : 1.0);
+    double z = local.Z * ((std::isfinite(t.ScaleZ) && std::abs(t.ScaleZ) > 0.001) ? t.ScaleZ : 1.0);
+
+    double qx = t.RotX, qy = t.RotY, qz = t.RotZ, qw = t.RotW;
+    double len2 = qx*qx + qy*qy + qz*qz + qw*qw;
+    if (!std::isfinite(len2) || len2 < 0.5 || len2 > 2.0) {
+        qx = qy = qz = 0.0;
+        qw = 1.0;
+    } else {
+        double inv_len = 1.0 / std::sqrt(len2);
+        qx *= inv_len; qy *= inv_len; qz *= inv_len; qw *= inv_len;
+    }
+
+    double t2x = qx * 2.0, t2y = qy * 2.0, t2z = qz * 2.0;
+    double wt2x = qw * t2x, wt2y = qw * t2y, wt2z = qw * t2z;
+    double xt2x = qx * t2x, xt2y = qx * t2y, xt2z = qx * t2z;
+    double yt2y = qy * t2y, yt2z = qy * t2z, zt2z = qz * t2z;
+
+    return {
+        t.PosX + (1.0 - (yt2y + zt2z)) * x + (xt2y - wt2z) * y + (xt2z + wt2y) * z,
+        t.PosY + (xt2y + wt2z) * x + (1.0 - (xt2x + zt2z)) * y + (yt2z - wt2x) * z,
+        t.PosZ + (xt2z - wt2y) * x + (yt2z + wt2x) * y + (1.0 - (xt2x + yt2y)) * z,
+    };
+}
+
+inline void DbdDrawObb(ImDrawList* dl, const DbdObjectData& obj,
+                       const dbd_w2s::CameraAxes& axes,
+                       const dbd_w2s::ScreenSize& ss,
+                       float y_off, ImU32 col) {
+    if (!obj.has_obb)
+        return;
+
+    const DbdUEVector& e = obj.obb_extent;
+    if (!DbdIsFiniteVec(e) || e.X <= 0.0 || e.Y <= 0.0 || e.Z <= 0.0)
+        return;
+
+    const DbdUEVector local[8] = {
+        {-e.X, -e.Y, -e.Z}, { e.X, -e.Y, -e.Z}, { e.X,  e.Y, -e.Z}, {-e.X,  e.Y, -e.Z},
+        {-e.X, -e.Y,  e.Z}, { e.X, -e.Y,  e.Z}, { e.X,  e.Y,  e.Z}, {-e.X,  e.Y,  e.Z},
+    };
+    DbdUEVector world[8]{};
+    dbd_w2s::ScreenPoint screen[8]{};
+    bool front[8]{};
+    bool any_visible = false;
+
+    for (int i = 0; i < 8; ++i) {
+        world[i] = DbdTransformPoint(obj.obb_transform, local[i]);
+        if (!DbdIsFiniteVec(world[i]))
+            return;
+        front[i] = dbd_w2s::IsInFront(world[i], axes);
+        screen[i] = dbd_w2s::Project(world[i], axes, ss);
+        screen[i].Y += y_off;
+        any_visible = any_visible || (front[i] && dbd_w2s::IsOnScreen(screen[i], ss));
+    }
+    if (!any_visible)
+        return;
+
+    static const int edges[12][2] = {
+        {0,1}, {1,2}, {2,3}, {3,0},
+        {4,5}, {5,6}, {6,7}, {7,4},
+        {0,4}, {1,5}, {2,6}, {3,7},
+    };
+    ImU32 shadow = IM_COL32(0, 0, 0, 180);
+    for (const auto& edge : edges) {
+        int a = edge[0], b = edge[1];
+        if (!front[a] || !front[b])
+            continue;
+        ImVec2 pa(screen[a].X, screen[a].Y);
+        ImVec2 pb(screen[b].X, screen[b].Y);
+        dl->AddLine(ImVec2(pa.x + 1.0f, pa.y + 1.0f), ImVec2(pb.x + 1.0f, pb.y + 1.0f), shadow, 2.5f);
+        dl->AddLine(pa, pb, col, 1.5f);
+    }
+}
+
+inline void DbdDrawRaisedText(ImDrawList* dl, ImVec2 pos, const char* text, ImU32 col, float font_size) {
+    ImFont* font = ImGui::GetFont();
+    ImU32 outline = IM_COL32(0, 0, 0, 235);
+
+    dl->AddText(font, font_size, ImVec2(pos.x - 1.0f, pos.y), outline, text);
+    dl->AddText(font, font_size, ImVec2(pos.x + 1.0f, pos.y), outline, text);
+    dl->AddText(font, font_size, ImVec2(pos.x, pos.y - 1.0f), outline, text);
+    dl->AddText(font, font_size, ImVec2(pos.x, pos.y + 1.0f), outline, text);
+    dl->AddText(font, font_size, pos, col, text);
+}
+
+inline void DbdDrawGeneratorOverlay(ImDrawList* dl, const DbdObjectData& obj,
+                                    const dbd_w2s::CameraAxes& axes,
+                                    const dbd_w2s::ScreenSize& ss,
+                                    float y_off, const char* percent_text,
+                                    const char* status_text, float pct,
+                                    ImU32 col) {
+    DbdUEVector center = obj.position;
+    if (obj.has_obb)
+        center = {obj.obb_transform.PosX, obj.obb_transform.PosY, obj.obb_transform.PosZ};
+    if (!dbd_w2s::IsInFront(center, axes))
+        return;
+
+    auto sp = dbd_w2s::Project(center, axes, ss);
+    sp.Y += y_off;
+    if (!dbd_w2s::IsOnScreen(sp, ss))
+        return;
+
+    float font_size = ImGui::GetFontSize();
+    float status_font_size = ImGui::GetFontSize() * 0.82f;
+    ImFont* font = ImGui::GetFont();
+    ImVec2 pct_ts = font->CalcTextSizeA(font_size, 10000.0f, 0.0f, percent_text);
+    ImVec2 pct_pos(sp.X - pct_ts.x * 0.5f, sp.Y - pct_ts.y * 0.5f - 5.0f);
+    DbdDrawRaisedText(dl, pct_pos, percent_text, col, font_size);
+
+    if (status_text && status_text[0]) {
+        ImVec2 st_ts = font->CalcTextSizeA(status_font_size, 10000.0f, 0.0f, status_text);
+        ImVec2 st_pos(sp.X - st_ts.x * 0.5f, pct_pos.y - st_ts.y - 2.0f);
+        DbdDrawRaisedText(dl, st_pos, status_text, IM_COL32(255, 235, 80, 255), status_font_size);
+    }
+
+    float bar_w = std::max(48.0f, pct_ts.x + 18.0f);
+    float bar_h = 5.0f;
+    float bar_x = sp.X - bar_w * 0.5f;
+    float bar_y = pct_pos.y + pct_ts.y + 4.0f;
+    float fill = std::clamp(pct / 100.0f, 0.0f, 1.0f);
+    uint8_t r = static_cast<uint8_t>(255 * (1.0f - fill));
+    uint8_t g = static_cast<uint8_t>(185 + 70 * fill);
+
+    dl->AddRectFilled(ImVec2(bar_x - 2.0f, bar_y - 2.0f),
+                      ImVec2(bar_x + bar_w + 2.0f, bar_y + bar_h + 2.0f),
+                      IM_COL32(0, 0, 0, 220), 2.0f);
+    dl->AddRectFilled(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w, bar_y + bar_h),
+                      IM_COL32(18, 18, 18, 235), 2.0f);
+    if (fill > 0.005f) {
+        dl->AddRectFilled(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w * fill, bar_y + bar_h),
+                          IM_COL32(r, g, 0, 245), 2.0f);
+        dl->AddRectFilled(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w * fill, bar_y + 2.0f),
+                          IM_COL32(255, 255, 170, 110), 2.0f);
+    }
+    dl->AddRect(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w, bar_y + bar_h),
+                IM_COL32(255, 255, 210, 210), 2.0f, 0, 1.5f);
+}
+
 inline ImU32 DbdObjectColor(EDbdObjectType t) {
     switch (t) {
         case EDbdObjectType::Generator:     return IM_COL32(255, 215,   0, 255);
@@ -118,6 +258,10 @@ struct DbdEspSettings {
         true,  true,  true,  true,  true,
         true,  true,  true,  true,  true, true, true
     };
+    bool  obj_box_name[static_cast<int>(EDbdObjectType::OBJ_COUNT)] = {
+        true,  true,  true,  true,  true,
+        true,  true,  true,  true,  true, true, true
+    };
 
     bool  show_debug_overlay = false;
     float esp_y_offset = 0.0f;
@@ -148,7 +292,7 @@ struct DbdEspSettings {
 
     DbdAuraConfig get_aura_config() const {
         DbdAuraConfig cfg;
-        cfg.enabled = aura_enabled;
+        cfg.enabled = show_debug_overlay && aura_enabled;
         cfg.survivor_aura = aura_survivors;
         cfg.killer_aura = aura_killer;
         cfg.survivor_color = {aura_surv_color[0], aura_surv_color[1], aura_surv_color[2], aura_surv_color[3]};
@@ -203,7 +347,12 @@ struct DbdEspSettings {
             char key[64];
             snprintf(key, sizeof(key), "  \"obj_show_%d\": %s,\n", i, obj_show[i] ? "true" : "false");
             n += snprintf(buf + n, sizeof(buf) - n, "%s", key);
-            snprintf(key, sizeof(key), "  \"obj_dist_%d\": %.1f", i, obj_dist[i]);
+            snprintf(key, sizeof(key), "  \"obj_dist_%d\": %.1f,\n", i, obj_dist[i]);
+            n += snprintf(buf + n, sizeof(buf) - n, "%s", key);
+        }
+        for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); i++) {
+            char key[64];
+            snprintf(key, sizeof(key), "  \"obj_box_name_%d\": %s", i, obj_box_name[i] ? "true" : "false");
             n += snprintf(buf + n, sizeof(buf) - n, "%s%s\n",
                 key, (i < static_cast<int>(EDbdObjectType::OBJ_COUNT) - 1) ? "," : "");
         }
@@ -234,11 +383,11 @@ struct DbdEspSettings {
         show_skeleton = gb("show_skeleton", show_skeleton);
         max_distance = gf("max_distance", max_distance);
         show_objects = gb("show_objects", show_objects);
-        show_debug_overlay = gb("show_debug_overlay", show_debug_overlay);
+        show_debug_overlay = false;
         esp_y_offset = gf("esp_y_offset", esp_y_offset);
         hide_dull_totems = gb("hide_dull_totems", hide_dull_totems);
         auto_skillcheck = gb("auto_skillcheck", auto_skillcheck);
-        aura_enabled = gb("aura_enabled", aura_enabled);
+        aura_enabled = false;
         aura_survivors = gb("aura_survivors", aura_survivors);
         aura_killer = gb("aura_killer", aura_killer);
         auto ga4 = [&](const char* k, float* arr) {
@@ -270,6 +419,8 @@ struct DbdEspSettings {
             obj_show[i] = gb(key, obj_show[i]);
             snprintf(key, sizeof(key), "obj_dist_%d", i);
             obj_dist[i] = gf(key, obj_dist[i]);
+            snprintf(key, sizeof(key), "obj_box_name_%d", i);
+            obj_box_name[i] = gb(key, obj_box_name[i]);
         }
     }
 };
@@ -293,6 +444,8 @@ public:
             if (!p.valid)
                 continue;
             if (p.is_local)
+                continue;
+            if (p.type == EDbdActorType::Survivor && p.health_states < 0)
                 continue;
             if (p.position.X == 0.0 && p.position.Y == 0.0 && p.position.Z == 0.0)
                 continue;
@@ -437,32 +590,21 @@ public:
                 const char* base_name = DbdObjectTypeName(obj.type);
 
                 char label[128];
+                char gen_percent_label[32]{};
+                char gen_status_label[32]{};
+                bool custom_label_drawn = false;
+                float gen_pct = 0.0f;
                 switch (obj.type) {
                     case EDbdObjectType::Generator: {
-                        float pct = (obj.gen_progress >= 0 && obj.gen_max_charge > 0)
+                        gen_pct = (obj.gen_progress >= 0 && obj.gen_max_charge > 0)
                             ? (obj.gen_progress / obj.gen_max_charge) * 100.0f : 0;
-                        if (pct > 100) pct = 100;
+                        if (gen_pct > 100) gen_pct = 100;
+                        if (gen_pct >= 99.5f)
+                            continue;
+                        snprintf(gen_percent_label, sizeof(gen_percent_label), "%.0f%%", gen_pct);
                         if (obj.gen_blocked)
-                            snprintf(label, sizeof(label), "Gen [BLOCKED] [%dm]", (int)obj.distance);
-                        else if (pct >= 99.5f) {
-                            snprintf(label, sizeof(label), "Gen [DONE] [%dm]", (int)obj.distance);
-                            col = IM_COL32(50, 255, 50, 255);
-                        } else
-                            snprintf(label, sizeof(label), "Gen %.0f%% [%dm]", pct, (int)obj.distance);
-
-                        float bar_w = 40.0f, bar_h = 5.0f;
-                        float bar_x = sp.X - bar_w * 0.5f;
-                        float bar_y = sp.Y - 28.0f;
-                        float fill = pct / 100.0f;
-                        uint8_t r = (uint8_t)(255 * (1.0f - fill));
-                        uint8_t g = (uint8_t)(200 + 55 * fill);
-                        dl->AddRectFilled(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w, bar_y + bar_h),
-                                          IM_COL32(20, 20, 20, 200));
-                        if (fill > 0.005f)
-                            dl->AddRectFilled(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w * fill, bar_y + bar_h),
-                                              IM_COL32(r, g, 0, 230));
-                        dl->AddRect(ImVec2(bar_x, bar_y), ImVec2(bar_x + bar_w, bar_y + bar_h),
-                                    IM_COL32(180, 180, 180, 150), 0, 0, 1.0f);
+                            snprintf(gen_status_label, sizeof(gen_status_label), "BLOCKED");
+                        snprintf(label, sizeof(label), "Gen %.0f%% [%dm]", gen_pct, (int)obj.distance);
                         break;
                     }
                     case EDbdObjectType::Pallet: {
@@ -527,13 +669,29 @@ public:
                         break;
                 }
 
-                auto ts = ImGui::CalcTextSize(label);
-                float lx = sp.X - ts.x * 0.5f;
-                float ly_off = (obj.type == EDbdObjectType::Generator) ? -38.0f : -3.0f;
-                float ly = sp.Y + ly_off - ts.y;
+                if (settings.show_boxes && DbdObjectSupportsBox(obj.type))
+                    DbdDrawObb(dl, obj, axes, ss, y_off, col);
 
-                dl->AddText(ImVec2(lx + 1, ly + 1), IM_COL32(0, 0, 0, 180), label);
-                dl->AddText(ImVec2(lx, ly), col, label);
+                const bool draw_label = !DbdObjectSupportsBox(obj.type) || settings.obj_box_name[ti];
+                if (draw_label && obj.type == EDbdObjectType::Generator) {
+                    DbdDrawGeneratorOverlay(dl, obj, axes, ss, y_off,
+                                            gen_percent_label, gen_status_label,
+                                            gen_pct, col);
+                    custom_label_drawn = true;
+                }
+                if (draw_label) {
+                    if (custom_label_drawn) {
+                        dl->AddCircleFilled(ImVec2(sp.X, sp.Y), 2.5f, col);
+                        continue;
+                    }
+                    auto ts = ImGui::CalcTextSize(label);
+                    float lx = sp.X - ts.x * 0.5f;
+                    float ly_off = (obj.type == EDbdObjectType::Generator) ? -38.0f : -3.0f;
+                    float ly = sp.Y + ly_off - ts.y;
+
+                    dl->AddText(ImVec2(lx + 1, ly + 1), IM_COL32(0, 0, 0, 180), label);
+                    dl->AddText(ImVec2(lx, ly), col, label);
+                }
 
                 dl->AddCircleFilled(ImVec2(sp.X, sp.Y), 2.5f, col);
             }
@@ -700,6 +858,12 @@ public:
                     char sid[32];
                     snprintf(sid, sizeof(sid), "##od%d", i);
                     ImGui::SliderFloat(sid, &settings.obj_dist[i], 10.0f, 300.0f, "%.0fm");
+                    if (DbdObjectSupportsBox(static_cast<EDbdObjectType>(i))) {
+                        ImGui::SameLine();
+                        char nid[32];
+                        snprintf(nid, sizeof(nid), "Name##obn%d", i);
+                        ImGui::Checkbox(nid, &settings.obj_box_name[i]);
+                    }
                 }
             }
             ImGui::Checkbox("Hide Dull Totems", &settings.hide_dull_totems);
@@ -708,43 +872,50 @@ public:
 
         ImGui::Separator();
         ImGui::Checkbox("Debug On Screen", &settings.show_debug_overlay);
-
-        ImGui::Separator();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.0f, 1.0f));
-        ImGui::Checkbox("Aura [Memory Write]", &settings.aura_enabled);
-        ImGui::PopStyleColor();
-        if (settings.aura_enabled) {
+        if (settings.show_debug_overlay) {
             ImGui::Indent(10.0f);
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 0.8f),
-                "Writes to game memory");
 
-            ImGui::SeparatorText("Players");
-            ImGui::Checkbox("Survivor Aura", &settings.aura_survivors);
-            if (settings.aura_survivors) {
-                ImGui::SameLine();
-                ImGui::ColorEdit4("##surv_aura_col", settings.aura_surv_color,
-                    ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
-            }
-            ImGui::Checkbox("Killer Aura", &settings.aura_killer);
-            if (settings.aura_killer) {
-                ImGui::SameLine();
-                ImGui::ColorEdit4("##kill_aura_col", settings.aura_killer_color,
-                    ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
-            }
+            ImGui::Separator();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.0f, 1.0f));
+            ImGui::Checkbox("Aura [Memory Write]", &settings.aura_enabled);
+            ImGui::PopStyleColor();
+            if (settings.aura_enabled) {
+                ImGui::Indent(10.0f);
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 0.8f),
+                    "Writes to game memory");
 
-            ImGui::SeparatorText("Objects");
-            for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); ++i) {
-                char cbid[32], label[64];
-                snprintf(cbid, sizeof(cbid), "##auraobj%d", i);
-                snprintf(label, sizeof(label), "%s##aura_%d", DbdObjectTypeName(static_cast<EDbdObjectType>(i)), i);
-                ImGui::Checkbox(label, &settings.aura_obj[i]);
-                if (settings.aura_obj[i]) {
+                ImGui::SeparatorText("Players");
+                ImGui::Checkbox("Survivor Aura", &settings.aura_survivors);
+                if (settings.aura_survivors) {
                     ImGui::SameLine();
-                    ImGui::ColorEdit4(cbid, settings.aura_obj_color[i],
+                    ImGui::ColorEdit4("##surv_aura_col", settings.aura_surv_color,
                         ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
                 }
+                ImGui::Checkbox("Killer Aura", &settings.aura_killer);
+                if (settings.aura_killer) {
+                    ImGui::SameLine();
+                    ImGui::ColorEdit4("##kill_aura_col", settings.aura_killer_color,
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                }
+
+                ImGui::SeparatorText("Objects");
+                for (int i = 0; i < static_cast<int>(EDbdObjectType::OBJ_COUNT); ++i) {
+                    char cbid[32], label[64];
+                    snprintf(cbid, sizeof(cbid), "##auraobj%d", i);
+                    snprintf(label, sizeof(label), "%s##aura_%d", DbdObjectTypeName(static_cast<EDbdObjectType>(i)), i);
+                    ImGui::Checkbox(label, &settings.aura_obj[i]);
+                    if (settings.aura_obj[i]) {
+                        ImGui::SameLine();
+                        ImGui::ColorEdit4(cbid, settings.aura_obj_color[i],
+                            ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                    }
+                }
+                ImGui::Unindent(10.0f);
             }
+
             ImGui::Unindent(10.0f);
+        } else {
+            settings.aura_enabled = false;
         }
 
         ImGui::Separator();

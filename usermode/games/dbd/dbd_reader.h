@@ -2,6 +2,7 @@
 #define DBD_READER_H
 
 #include <cstdint>
+#include <cctype>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -114,28 +115,29 @@ public:
         if (gworld != last_gworld_) {
             actor_class_cache_.clear();
             aura_cache_.clear();
+            aura_written_.clear();
             player_cache_.clear();
             last_gworld_ = gworld;
         }
 
         if (!gnames_resolved_) {
-            static const uint64_t gnames_offsets[] = {
-                DBD_EGS_GNAMES_OFFSET,
-                0x0BCCE680,
-            };
-
-            for (auto off : gnames_offsets) {
-                uint64_t addr = base_address + off;
-                gnames_.set_address(addr);
-                if (gnames_.test_resolve(client_, pid, gworld)) {
-                    gnames_resolved_ = true;
-                    break;
-                }
+            gnames_.set_address(base_address + DBD_EGS_GNAMES_OFFSET);
+            if (gnames_.test_resolve(client_, pid, gworld, base_address)) {
+                gnames_resolved_ = true;
+                state.debug.add_event("GNames: OK (strategy %d) -> %s",
+                    gnames_.get_strategy(), gnames_.get_test_result());
+            } else {
+                state.debug.add_event("GNames: FAILED all strategies");
+                const char* diag = gnames_.get_diag();
+                if (diag[0])
+                    state.debug.add_event("%.120s", diag);
             }
-            if (!gnames_resolved_)
-                state.debug.add_event("GNames: FAILED all offsets");
         }
         state.debug.gnames_ok = gnames_resolved_;
+        if (gnames_resolved_) {
+            snprintf(state.debug.gnames_test, sizeof(state.debug.gnames_test),
+                "%s", gnames_.get_test_result());
+        }
 
         uint64_t persistent_level = 0;
         if (!read_ptr(pid, gworld + DBD_PERSISTENT_LEVEL, persistent_level)) {
@@ -200,8 +202,11 @@ public:
                         do_update = (obj_update_counter_ % 30 == 0);
                         break;
                 }
-                if (do_update)
+                if (do_update) {
                     read_object_state(pid, obj.address, obj);
+                    if (DbdObjectSupportsBox(obj.type) && (obj.type == EDbdObjectType::Pallet || !obj.has_obb))
+                        read_object_obb(pid, obj.address, obj);
+                }
             }
         }
 
@@ -285,6 +290,7 @@ private:
         uint64_t resolve_cycle{};
     };
     std::unordered_map<uint64_t, AuraCacheEntry> aura_cache_;
+    std::unordered_set<uint64_t> aura_written_;
     static constexpr uint64_t AURA_CACHE_TTL = 30;
 
     uint64_t find_aura_component(int pid, uint64_t actor_addr) {
@@ -299,15 +305,29 @@ private:
             aura_cache_.erase(it);
         }
 
+        static const uint32_t component_arrays[] = {
+            DBD_ACTOR_BLUEPRINT_COMPONENTS,
+            DBD_ACTOR_COMPONENTS,
+        };
+
+        for (uint32_t array_offset : component_arrays) {
+            uint64_t aura = find_aura_component_in_array(pid, actor_addr, array_offset);
+            if (aura) {
+                aura_cache_[actor_addr] = {aura, cycle_};
+                return aura;
+            }
+        }
+
+        aura_cache_[actor_addr] = {0, cycle_};
+        return 0;
+    }
+
+    uint64_t find_aura_component_in_array(int pid, uint64_t actor_addr, uint32_t array_offset) {
         DbdTArray comp_array{};
-        if (!read_val(pid, actor_addr + DBD_ACTOR_COMPONENTS, comp_array)) {
-            aura_cache_[actor_addr] = {0, cycle_};
+        if (!read_val(pid, actor_addr + array_offset, comp_array))
             return 0;
-        }
-        if (!DbdIsLikelyPointer(comp_array.Data) || comp_array.Count == 0 || comp_array.Count > 256) {
-            aura_cache_[actor_addr] = {0, cycle_};
+        if (!DbdIsLikelyPointer(comp_array.Data) || comp_array.Count == 0 || comp_array.Count > 256)
             return 0;
-        }
 
         for (uint32_t i = 0; i < comp_array.Count; i++) {
             uint64_t comp = 0;
@@ -315,17 +335,61 @@ private:
             if (!DbdIsLikelyPointer(comp)) continue;
 
             std::string class_name = gnames_.resolve_object_class_name(client_, pid, comp);
-            if (class_name.empty()) continue;
+            std::string object_name = resolve_object_name(pid, comp);
 
-            if (class_name.find("DBDAura") != std::string::npos ||
-                class_name.find("AuraComponent") != std::string::npos) {
-                aura_cache_[actor_addr] = {comp, cycle_};
+            if ((is_aura_component_name(class_name) || is_aura_component_name(object_name)) &&
+                validate_aura_ptr(pid, comp)) {
                 return comp;
+            }
+
+            if (is_aura_strategy_name(class_name) || is_aura_strategy_name(object_name)) {
+                uint64_t strategy_aura = 0;
+                if (read_ptr(pid, comp + DBD_AURA_STRATEGY_COMPONENT, strategy_aura) &&
+                    validate_aura_ptr(pid, strategy_aura)) {
+                    return strategy_aura;
+                }
             }
         }
 
-        aura_cache_[actor_addr] = {0, cycle_};
         return 0;
+    }
+
+    std::string resolve_object_name(int pid, uint64_t object_addr) {
+        uint32_t fname_index = 0;
+        if (!read_val(pid, object_addr + DBD_OBJECT_NAME, fname_index))
+            return {};
+        return gnames_.resolve(client_, pid, fname_index);
+    }
+
+    static bool contains_ascii_ci(const std::string& text, const char* needle) {
+        if (!needle || !*needle) return true;
+        size_t needle_len = strlen(needle);
+        if (needle_len > text.size()) return false;
+        for (size_t i = 0; i + needle_len <= text.size(); i++) {
+            bool matched = true;
+            for (size_t j = 0; j < needle_len; j++) {
+                unsigned char a = static_cast<unsigned char>(text[i + j]);
+                unsigned char b = static_cast<unsigned char>(needle[j]);
+                if (std::tolower(a) != std::tolower(b)) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) return true;
+        }
+        return false;
+    }
+
+    static bool is_aura_component_name(const std::string& name) {
+        return contains_ascii_ci(name, "DBDAura") ||
+               contains_ascii_ci(name, "AuraComponent") ||
+               contains_ascii_ci(name, "DBDOutline") ||
+               contains_ascii_ci(name, "OutlineComponent");
+    }
+
+    static bool is_aura_strategy_name(const std::string& name) {
+        return contains_ascii_ci(name, "AuraUpdateStrategy") ||
+               contains_ascii_ci(name, "OutlineUpdateStrategy");
     }
 
     bool validate_aura_ptr(int pid, uint64_t aura_addr) {
@@ -339,14 +403,31 @@ private:
         if (!read_ptr(pid, aura_addr + 0x10, class_ptr)) return false;
         if (!DbdIsLikelyPointer(class_ptr)) return false;
 
-        float test_r = 0;
-        if (!read_val(pid, aura_addr + DBD_AURA_COLOR_R, test_r)) return false;
-        if (test_r < -1.0f || test_r > 10.0f) return false;
+        float min_dist = 0.0f;
+        float min_dist_always = 0.0f;
+        if (!read_val(pid, aura_addr + DBD_AURA_MIN_DIST, min_dist)) return false;
+        if (!read_val(pid, aura_addr + DBD_AURA_MIN_DIST_ALWAYS_VISIBLE, min_dist_always)) return false;
+        if (!std::isfinite(min_dist) || !std::isfinite(min_dist_always)) return false;
+        if (min_dist < -1.0f || min_dist > 100000.0f) return false;
+        if (min_dist_always < -1.0f || min_dist_always > 100000.0f) return false;
 
         return true;
     }
 
+    bool is_aura_render_ready(int pid, uint64_t aura_addr) {
+        uint64_t batch_commands = 0;
+        uint64_t rendering_strategy = 0;
+        read_ptr(pid, aura_addr + DBD_AURA_BATCH_MESH_COMMANDS, batch_commands);
+        read_ptr(pid, aura_addr + DBD_AURA_RENDERING_STRATEGY, rendering_strategy);
+        return DbdIsLikelyPointer(batch_commands) || DbdIsLikelyPointer(rendering_strategy);
+    }
+
     void write_aura(int pid, uint64_t aura_addr, const DbdAuraColor& color) {
+        (void)color;
+        bool render_ready = is_aura_render_ready(pid, aura_addr);
+        if (render_ready && aura_written_.find(aura_addr) != aura_written_.end())
+            return;
+
         if (!validate_aura_ptr(pid, aura_addr)) {
             for (auto it = aura_cache_.begin(); it != aura_cache_.end(); ++it) {
                 if (it->second.aura_addr == aura_addr) {
@@ -356,9 +437,47 @@ private:
             }
             return;
         }
-        float rgba[4] = {color.r, color.g, color.b, color.a};
-        client_.write_mem(pid, aura_addr + DBD_AURA_COLOR_R,
-                          sizeof(rgba), reinterpret_cast<const unsigned char*>(rgba));
+        uint8_t backup_valid = 0;
+        read_val(pid, aura_addr + DBD_AURA_OVERRIDE_BACKUP_VALID, backup_valid);
+        if (!backup_valid) {
+            struct AuraVisibilityBackup {
+                uint8_t always_visible;
+                uint8_t pad[3];
+                float min_dist_always;
+                float min_dist;
+            } backup{};
+            read_val(pid, aura_addr + DBD_AURA_IS_ALWAYS_VISIBLE, backup.always_visible);
+            read_val(pid, aura_addr + DBD_AURA_MIN_DIST_ALWAYS_VISIBLE, backup.min_dist_always);
+            read_val(pid, aura_addr + DBD_AURA_MIN_DIST, backup.min_dist);
+            client_.write_mem(pid, aura_addr + DBD_AURA_OVERRIDE_BACKUP,
+                              sizeof(backup), reinterpret_cast<const unsigned char*>(&backup));
+            backup_valid = 1;
+            client_.write_mem(pid, aura_addr + DBD_AURA_OVERRIDE_BACKUP_VALID,
+                              sizeof(backup_valid), &backup_valid);
+        }
+
+        uint8_t always_visible = 1;
+        uint8_t off = 0;
+        float interpolation_speed = 4096.0f;
+        float zero_dist = 0.0f;
+        client_.write_mem(pid, aura_addr + DBD_AURA_INTERPOLATION_SPEED,
+                          sizeof(interpolation_speed), reinterpret_cast<const unsigned char*>(&interpolation_speed));
+        client_.write_mem(pid, aura_addr + DBD_AURA_SHOULD_BE_ABOVE,
+                          sizeof(always_visible), &always_visible);
+        client_.write_mem(pid, aura_addr + DBD_AURA_FORCE_FAR_AWAY,
+                          sizeof(off), &off);
+        client_.write_mem(pid, aura_addr + DBD_AURA_LIMIT_CUSTOM_DEPTH,
+                          sizeof(off), &off);
+        client_.write_mem(pid, aura_addr + DBD_AURA_FADE_OUT_CLOSING_IN,
+                          sizeof(off), &off);
+        client_.write_mem(pid, aura_addr + DBD_AURA_IS_ALWAYS_VISIBLE,
+                          sizeof(always_visible), &always_visible);
+        client_.write_mem(pid, aura_addr + DBD_AURA_MIN_DIST_ALWAYS_VISIBLE,
+                          sizeof(zero_dist), reinterpret_cast<const unsigned char*>(&zero_dist));
+        client_.write_mem(pid, aura_addr + DBD_AURA_MIN_DIST,
+                          sizeof(zero_dist), reinterpret_cast<const unsigned char*>(&zero_dist));
+        if (render_ready)
+            aura_written_.insert(aura_addr);
     }
 
     std::string test_gnames_resolve(int pid, uint64_t gworld) {
@@ -526,6 +645,10 @@ private:
             obj.position = pos;
 
             read_object_state(pid, actor, obj);
+            if (DbdObjectSupportsBox(obj.type))
+                read_object_obb(pid, actor, obj);
+            if (is_duplicate_object(obj, state.objects))
+                continue;
 
             state.objects.push_back(obj);
         }
@@ -535,10 +658,69 @@ private:
         state.debug.object_match_count = static_cast<uint32_t>(state.objects.size());
     }
 
+    static bool is_pallet_actor_name(const std::string& name) {
+        const bool looks_like_pallet =
+            name == "Pallet" ||
+            name.find("BP_Pallet") != std::string::npos ||
+            name.find("Pallet") != std::string::npos;
+        if (!looks_like_pallet)
+            return false;
+
+        static const char* non_pallet_tokens[] = {
+            "Tracker", "Cosmetic", "Component", "Interaction", "Definition",
+            "Ability", "Addon", "Anim", "State", "Evaluator", "Action",
+            "Skill", "Placement", "Achievement", "Selection", "Targeting",
+            "Spawner", "Visibility", "Collider", "Collision", "Blocker",
+            "Helper", "Montage", "Settings", "Data", "Behaviour", "Vault",
+            "Repair", "Break", "Lift", "Pull", "Drop", "Stun",
+        };
+        for (const char* token : non_pallet_tokens) {
+            if (name.find(token) != std::string::npos)
+                return false;
+        }
+        return true;
+    }
+
+    static bool is_escape_door_actor_name(const std::string& name) {
+        const bool looks_like_escape =
+            name == "EscapeDoor" ||
+            name.find("EscapeDoor") != std::string::npos ||
+            name.find("BP_Escape") != std::string::npos ||
+            name.find("_Escape") != std::string::npos;
+        if (!looks_like_escape)
+            return false;
+
+        static const char* non_door_tokens[] = {
+            "Anim", "Interaction", "Definition", "Achievement", "SubAnim",
+            "Component", "Effect", "Skill", "Addon", "Ability", "Incentive",
+            "Blocker", "Zone", "Area", "Trigger", "Volume", "Target",
+            "Manager", "Evaluator", "Data", "Montage", "Status",
+        };
+        for (const char* token : non_door_tokens) {
+            if (name.find(token) != std::string::npos)
+                return false;
+        }
+        return true;
+    }
+
+    static bool is_duplicate_object(const DbdObjectData& obj, const std::vector<DbdObjectData>& objects) {
+        if (obj.type != EDbdObjectType::EscapeDoor && obj.type != EDbdObjectType::Pallet)
+            return false;
+
+        const float min_dist = (obj.type == EDbdObjectType::EscapeDoor) ? 800.0f : 250.0f;
+        for (const auto& other : objects) {
+            if (other.type != obj.type)
+                continue;
+            if (DbdVectorDistance(obj.position, other.position) < min_dist)
+                return true;
+        }
+        return false;
+    }
+
     static bool classify_object(const std::string& name, EDbdObjectType& out) {
         if (name.find("Generator") != std::string::npos)       { out = EDbdObjectType::Generator; return true; }
         if (name.find("Totem") != std::string::npos)            { out = EDbdObjectType::Totem; return true; }
-        if (name.find("Pallet") != std::string::npos)           { out = EDbdObjectType::Pallet; return true; }
+        if (is_pallet_actor_name(name))                         { out = EDbdObjectType::Pallet; return true; }
         if (name.find("MeatHook") != std::string::npos ||
             name.find("Hook") != std::string::npos ||
             name.find("Locker") != std::string::npos)           { out = EDbdObjectType::Hook; return true; }
@@ -549,7 +731,7 @@ private:
         if (name.find("Window") != std::string::npos)           { out = EDbdObjectType::Window; return true; }
         if (name.find("Trap") != std::string::npos ||
             name.find("BearTrap") != std::string::npos)         { out = EDbdObjectType::Trap; return true; }
-        if (name.find("_Escape") != std::string::npos)          { out = EDbdObjectType::EscapeDoor; return true; }
+        if (is_escape_door_actor_name(name))                    { out = EDbdObjectType::EscapeDoor; return true; }
         if (name.find("BreakableWall") != std::string::npos ||
             name.find("Breakable") != std::string::npos)        { out = EDbdObjectType::BreakableDoor; return true; }
         if (name.find("FuelPump") != std::string::npos ||
@@ -600,13 +782,13 @@ private:
         switch (obj.type) {
             case EDbdObjectType::Generator: {
                 float native_pct = 0;
-                read_val(pid, actor + 0x7B4, native_pct);
+                read_val(pid, actor + DBD_GEN_NATIVE_PROGRESS, native_pct);
                 if (std::isfinite(native_pct) && native_pct >= 0 && native_pct <= 1.01f) {
                     obj.gen_progress = native_pct * 100.0f;
                     obj.gen_max_charge = 100.0f;
                 }
                 uint8_t repaired = 0;
-                read_val(pid, actor + 0x6E8, repaired);
+                read_val(pid, actor + DBD_GEN_REPAIRED, repaired);
                 if (repaired) {
                     obj.gen_progress = 100.0f;
                     obj.gen_max_charge = 100.0f;
@@ -653,6 +835,84 @@ private:
                 break;
             }
             default: break;
+        }
+    }
+
+    bool read_component_obb(int pid, uint64_t component, DbdObjectData& obj,
+                            const DbdUEVector& fallback_extent,
+                            bool read_box_extent = true,
+                            double vertical_center_offset = 0.0,
+                            bool update_object_position = true) {
+        if (!DbdIsLikelyPointer(component))
+            return false;
+
+        DbdFTransform transform{};
+        if (!read_val(pid, component + DBD_COMPONENT_TO_WORLD, transform))
+            return false;
+        if (!std::isfinite(transform.PosX) || !std::isfinite(transform.PosY) || !std::isfinite(transform.PosZ))
+            return false;
+
+        DbdUEVector extent = fallback_extent;
+        DbdUEVector read_extent{};
+        if (read_box_extent &&
+            read_val(pid, component + DBD_BOX_COMPONENT_EXTENT, read_extent) &&
+            DbdIsFiniteVec(read_extent) &&
+            read_extent.X > 1.0 && read_extent.Y > 1.0 && read_extent.Z > 1.0 &&
+            read_extent.X < 500.0 && read_extent.Y < 500.0 && read_extent.Z < 500.0) {
+            extent = read_extent;
+        }
+        transform.PosZ += vertical_center_offset;
+
+        obj.obb_transform = transform;
+        obj.obb_extent = extent;
+        obj.has_obb = true;
+        if (update_object_position)
+            obj.position = {transform.PosX, transform.PosY, transform.PosZ};
+        return true;
+    }
+
+    DbdUEVector object_obb_fallback_extent(const DbdObjectData& obj) const {
+        switch (obj.type) {
+            case EDbdObjectType::Generator:
+                return {58.0, 38.0, 82.0};
+            case EDbdObjectType::Window:
+                return {18.0, 95.0, 65.0};
+            case EDbdObjectType::Pallet:
+                return (obj.pallet_state == 2)
+                    ? DbdUEVector{105.0, 38.0, 18.0}
+                    : DbdUEVector{80.0, 16.0, 110.0};
+            default:
+                return {};
+        }
+    }
+
+    void read_object_obb(int pid, uint64_t actor, DbdObjectData& obj) {
+        obj.has_obb = false;
+        DbdUEVector fallback_extent = object_obb_fallback_extent(obj);
+        if (!DbdIsFiniteVec(fallback_extent) || fallback_extent.X <= 0.0)
+            return;
+
+        if (obj.type == EDbdObjectType::Pallet) {
+            uint64_t component = 0;
+            const bool down = (obj.pallet_state == 2);
+            const uint32_t primary = down ? DBD_PALLET_DOWNED_COLLIDER : DBD_PALLET_UP_COLLIDER;
+            const uint32_t secondary = down ? DBD_PALLET_UP_COLLIDER : DBD_PALLET_DOWNED_COLLIDER;
+            if (read_ptr(pid, actor + primary, component) && read_component_obb(pid, component, obj, fallback_extent))
+                return;
+            if (read_ptr(pid, actor + secondary, component) && read_component_obb(pid, component, obj, fallback_extent))
+                return;
+            return;
+        }
+
+        uint64_t root = 0;
+        if (read_ptr(pid, actor + DBD_ROOT_COMPONENT, root)) {
+            double vertical_center_offset = 0.0;
+            if (obj.type == EDbdObjectType::Generator)
+                vertical_center_offset = 82.0;
+            else if (obj.type == EDbdObjectType::Window)
+                vertical_center_offset = fallback_extent.Z;
+            const bool update_object_position = (obj.type == EDbdObjectType::Pallet);
+            read_component_obb(pid, root, obj, fallback_extent, false, vertical_center_offset, update_object_position);
         }
     }
 

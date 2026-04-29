@@ -222,7 +222,10 @@ public:
             row_hex("PersistentLevel", d.persistent_level ? ok : fail, d.persistent_level);
             row_hex("GameState", d.game_state ? ok : fail, d.game_state);
             row_hex("LocalPawn", d.local_pawn ? ok : warn, d.local_pawn);
-            row_text("GNames", d.gnames_ok ? ok : fail, d.gnames_ok ? "OK" : "FAILED");
+            if (d.gnames_ok && d.gnames_test[0])
+                row_text("GNames", ok, d.gnames_test);
+            else
+                row_text("GNames", fail, "FAILED");
 
             ImGui::TableNextColumn(); ImGui::TextColored(dim, "Camera");
             ImGui::TableNextColumn();
