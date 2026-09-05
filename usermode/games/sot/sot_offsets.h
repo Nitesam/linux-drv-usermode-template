@@ -6,6 +6,7 @@
 #include <cmath>
 #include <initializer_list>
 #include <string>
+#include <vector>
 
 // ── Base offsets (Steam build) ───────────────────────────────────
 #define SOT_GWORLD_OFFSET           0x9160A10
@@ -16,6 +17,7 @@
 #define SOT_UOBJECT_CLASS           0x0008   // UObject -> ClassPrivate
 #define SOT_UOBJECT_OUTER           0x0018   // UObject -> OuterPrivate
 #define SOT_UOBJECT_NAME            0x0020   // UObject -> NamePrivate (FName)
+#define SOT_USTRUCT_SUPER_STRUCT    0x0030   // UStruct -> SuperStruct
 
 // ── UWorld ───────────────────────────────────────────────────────
 #define SOT_WORLD_GAMESTATE         0x0040   // UWorld -> GameState
@@ -67,6 +69,7 @@
 #define SOT_PS_PLAYER_NAME          0x03A8   // APlayerState -> PlayerName (FString)
 
 // ── USceneComponent ──────────────────────────────────────────────
+#define SOT_SCENE_ATTACH_PARENT    0x00D0   // USceneComponent -> AttachParent
 #define SOT_SCENE_RELATIVE_LOC      0x00F8   // USceneComponent -> RelativeLocation (FVector: 3 floats)
 #define SOT_SCENE_RELATIVE_ROT      0x0104   // USceneComponent -> RelativeRotation (FRotator: 3 floats)
 #define SOT_SCENE_COMPONENT_TO_WORLD 0x0120  // Derived from current SDK layout: aligned FTransform after RelativeScale3D
@@ -215,11 +218,26 @@ struct SotDebugInfo {
     bool     gnames_ok{};
     char     camera_source[32]{};
     uint32_t actor_scan_count{};
+    uint32_t actor_array_offset{};
+    uint32_t actor_array_count{};
+    int32_t  actor_array_score{};
+    uint32_t class_resolve_fail_count{};
+    uint32_t broken_class_name_count{};
+    uint32_t unknown_type_count{};
+    uint32_t classified_actor_count{};
+    uint32_t position_fail_count{};
+    uint32_t bp_actor_count{};
     uint32_t player_count{};
     uint32_t ship_count{};
     uint32_t object_count{};
+    char     class_resolve_error[160]{};
+    uint32_t position_fail_sample_count{};
+    char     position_fail_samples[8][64]{};
     uint32_t unknown_actor_count{};
     char     unknown_actors[32][64]{};
+    char     local_pawn_class[160]{};
+    char     local_pawn_probe[256]{};
+    std::vector<std::string> bp_classes;
 };
 
 struct SotWorldState {
@@ -347,6 +365,12 @@ inline bool SotIsProbablyBrokenClassName(const std::string& cls) {
         return true;
 
     if (cls.size() < 5 && !SotClassEqualsAny(cls, {"Ship", "Storm"}))
+        return true;
+
+    // Runtime class names should not look like package/content paths.
+    if (cls.size() > 96 ||
+        cls.find('/') != std::string::npos ||
+        cls.find('\\') != std::string::npos)
         return true;
 
     if (SotClassContainsAny(cls, {
@@ -481,9 +505,6 @@ inline ESotActorType SotClassifyTrackedActorType(uint64_t tracked_type) {
         case SOT_TRACKED_DEPLOYABLE_CANNON:
             return ESotActorType::Cannon;
 
-        case SOT_TRACKED_FISHING_FISH:
-            return ESotActorType::Animal;
-
         case SOT_TRACKED_ROWBOAT_CANNON:
             return ESotActorType::Rowboat;
 
@@ -530,6 +551,45 @@ inline const char* SotTrackedActorTypeName(uint64_t tracked_type) {
     }
 }
 
+inline bool SotClassLooksLikeMetadata(const std::string& cls) {
+    return SotClassContainsAny(cls, {
+        "ActionRule",
+        "ActionState",
+        "Animation",
+        "Anim",
+        "Audio",
+        "Category",
+        "Component",
+        "Conditional",
+        "CustomServerEvent",
+        "Data",
+        "DataAsset",
+        "Debug",
+        "Desc",
+        "Event",
+        "Generator",
+        "Info",
+        "InputId",
+        "Interface",
+        "Material",
+        "Mesh",
+        "Meta",
+        "Mock",
+        "Params",
+        "Provider",
+        "Requirement",
+        "Reward",
+        "Service",
+        "Settings",
+        "Spawner",
+        "Stat",
+        "Step",
+        "Telemetry",
+        "Tutorial",
+        "Verbiage",
+    });
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  Actor classification by class name
 // ═══════════════════════════════════════════════════════════════════
@@ -550,12 +610,29 @@ inline ESotActorType SotClassifyActor(const std::string& cls) {
         }))
         return ESotActorType::Player;
 
-    // Forts and fort markers
-    if (SotClassContainsAny(cls, {
-            "FortOfTheDamned",
-            "SkeletonFort",
-            "SkullCloud",
-            "Spire",
+    // Forts and fort markers. Keep this narrow: the name pool contains many
+    // fort/event service, telemetry and scheduler classes with unusable roots.
+    if ((SotClassEqualsAny(cls, {
+             "SkellyFort",
+             "SkellyFortOfTheDamned",
+         }) ||
+         SotClassContainsAny(cls, {
+             "FortOfTheDamned",
+             "SkeletonFort",
+             "SkullCloud",
+         })) &&
+        !SotClassLooksLikeMetadata(cls) &&
+        SotClassContainsNone(cls, {
+            "Door",
+            "Service",
+            "Signal",
+            "Activity",
+            "OnDemand",
+            "Finder",
+            "Override",
+            "Completed",
+            "Started",
+            "Vicinity",
         }))
         return ESotActorType::Fort;
 
@@ -574,11 +651,44 @@ inline ESotActorType SotClassifyActor(const std::string& cls) {
         }))
         return ESotActorType::Rowboat;
 
-    // Cannons
+    // Ship storage barrels must be classified before Ships because their
+    // blueprint names include SmallShip/MediumShip/LargeShip.
     if (SotClassContainsAny(cls, {
-            "ACannon",
-            "Cannon",
+            "BP_SmallShipStorageBarrel_Cannonball_C",
+            "BP_MediumShipStorageBarrel_Cannonball_C",
+            "BP_LargeShipStorageBarrel_Cannonball_C",
+            "SmallShipStorageBarrel_Cannonball",
+            "MediumShipStorageBarrel_Cannonball",
+            "LargeShipStorageBarrel_Cannonball",
+            "SmallShipStorageBarrel",
+            "MediumShipStorageBarrel",
+            "LargeShipStorageBarrel",
+            "ShipStorageBarrel",
+            "StorageBarrel_Cannonball",
         }) &&
+        !SotClassLooksLikeMetadata(cls) &&
+        SotClassContainsNone(cls, {
+            "Disguise",
+            "Emote",
+            "Jettison",
+            "Request",
+            "Default__",
+        }))
+        return ESotActorType::Barrel;
+
+    // Cannons
+    if ((SotClassEqualsAny(cls, {
+             "Cannon",
+             "ACannon",
+         }) ||
+         SotClassContainsAny(cls, {
+             "BP_Cannon_PlayerLoadingInteractionPoint_C",
+             "BP_Cannon",
+             "Cannon_C",
+             "CannonMount",
+             "ShipCannon",
+             "Deployable_Cannon",
+         })) &&
         SotClassContainsNone(cls, {
             "CannonBall",
             "CannonProjectile",
@@ -586,6 +696,28 @@ inline ESotActorType SotClassifyActor(const std::string& cls) {
             "UseCannon",
             "CannonInput",
             "CannonAnim",
+            "CannonAI",
+            "AILocation",
+            "AISpawner",
+            "Spawner",
+            "Location",
+            "Manager",
+            "Component",
+            "Interface",
+            "Desc",
+            "Data",
+            "Params",
+            "Material",
+            "FirePoint",
+            "Recoil",
+            "Rotation",
+            "Status",
+            "Telemetry",
+            "Event",
+            "ActionState",
+            "Damager",
+            "ProjectileId",
+            "ItemDesc",
         }))
         return ESotActorType::Cannon;
 
@@ -613,21 +745,39 @@ inline ESotActorType SotClassifyActor(const std::string& cls) {
         }))
         return ESotActorType::Shipwreck;
 
-    // Ships
-    if (SotClassEqualsAny(cls, {
-            "Ship",
-            "AShip",
-        }) ||
-        SotClassContainsAny(cls, {
-            "ShipNetProxy",
-            "SmallShip",
-            "MediumShip",
-            "LargeShip",
-            "Sloop",
-            "Brigantine",
-            "Galleon",
-            "AIShip",
-            "AggressiveGhostShip",
+    // Ships. Keep this narrow: many ship parts/storage actors include
+    // SmallShip/MediumShip/LargeShip in their name but are not ship actors.
+    if ((SotClassEqualsAny(cls, {
+             "Ship",
+             "AShip",
+             "SmallShip",
+             "MediumShip",
+             "LargeShip",
+             "ShipNetProxy",
+             "AIGMULargeShip",
+             "AILargeShip",
+             "AISmallShip",
+         }) ||
+         SotClassContainsAny(cls, {
+             "BP_SmallShip",
+             "BP_MediumShip",
+             "BP_LargeShip",
+             "BP_Sloop",
+             "BP_Brigantine",
+             "BP_Galleon",
+             "AggressiveGhostShip",
+         })) &&
+        !SotClassLooksLikeMetadata(cls) &&
+        SotClassContainsNone(cls, {
+            "StorageBarrel",
+            "Pickup",
+            "Part",
+            "Livery",
+            "Preview",
+            "Customization",
+            "Interaction",
+            "Interactable",
+            "ProxyMarker",
         }))
         return ESotActorType::Ship;
 
@@ -651,7 +801,8 @@ inline ESotActorType SotClassifyActor(const std::string& cls) {
             "WaterBarrel",
             "TavernStrangersBarrel",
             "Jettisoned_Supplies",
-        }))
+        }) &&
+        !SotClassLooksLikeMetadata(cls))
         return ESotActorType::Barrel;
 
     // Chests / treasure
@@ -667,51 +818,143 @@ inline ESotActorType SotClassifyActor(const std::string& cls) {
             "BookOfSecrets",
             "MessageInABottle",
             "Pouch_Doubloons",
+        }) &&
+        !SotClassLooksLikeMetadata(cls) &&
+        SotClassContainsNone(cls, {
+            "ItemInfo",
+            "MemoryConstrained",
+            "AISpawner",
+            "ActiveChestData",
+            "MetaWrapper",
+            "Slot",
+            "PickUpFromSlot",
+            "Disguise",
         }))
         return ESotActorType::Chest;
 
     // Skeletons / hostile humanoid AI
     if (SotClassContainsAny(cls, {
-            "Skeleton",
+            "SkeletonPawn",
+            "SkeletonCharacter",
+            "SkeletonCaptain",
+            "SkeletonLord",
+            "BP_Skeleton",
             "AthenaAICharacter",
             "OceanCrawlerAICharacter",
             "Phantom",
         }) &&
         SotClassContainsNone(cls, {
             "SkeletonFortDoor",
+            "SkeletonFort",
             "SkeletonThrone",
             "SkeletonCamp",
+            "SkeletonSensing",
             "ActionStateCreatorDefinition",
             "AIController",
+            "Animation",
+            "Anim",
+            "Projectile",
+            "CannonBall",
+            "Component",
+            "Params",
+            "Service",
+            "Model",
+            "Mesh",
+            "Audio",
+            "Texture",
         }))
         return ESotActorType::Skeleton;
 
     // Animals
-    if (SotClassContainsAny(cls, {
-            "Chicken",
-            "Pig",
-            "Snake",
-            "SharkPawn",
-            "TinyShark",
-            "FishingFish",
-        }) &&
+    if ((SotClassEqualsAny(cls, {
+             "Chicken",
+             "AChicken",
+             "Pig",
+             "APig",
+             "Snake",
+             "ASnake",
+             "Shark",
+             "AShark",
+         }) ||
+         SotClassContainsAny(cls, {
+             "ChickenPawn",
+             "PigPawn",
+             "SnakePawn",
+             "BP_Chicken",
+             "BP_Pig",
+             "BP_Snake",
+             "SharkPawn",
+             "TinyShark",
+         })) &&
         SotClassContainsNone(cls, {
             "Service",
             "Experience",
             "Event",
+            "Food",
+            "Meat",
+            "Cooked",
+            "Raw",
+            "Bait",
+            "Item",
+            "ItemDesc",
+            "Category",
+            "Crate",
+            "Reward",
+            "Popup",
+            "PopUp",
+            "Entitlement",
+            "Totem",
+            "Material",
+            "Anim",
+            "Audio",
+            "Component",
+            "Spawner",
+            "Params",
+            "Data",
+            "Telemetry",
+            "Stat",
+            "QuestVariable",
+            "Pet",
         }))
         return ESotActorType::Animal;
 
     // World events
-    if (SotClassContainsAny(cls, {
-            "Kraken",
-            "Megalodon",
-            "AshenLord",
-            "Volcano",
-            "BurningBlade",
-        }) &&
+    if ((SotClassEqualsAny(cls, {
+             "Kraken",
+             "CoordinatedKraken",
+             "TinyKraken",
+             "KrakenTentacle",
+             "KrakenAnimatedTentacle",
+             "AshenLordEncounter",
+             "AshenLordAshCloud",
+             "AshenLordVolcano",
+         }) ||
+         SotClassContainsAny(cls, {
+             "Megalodon",
+             "BurningBlade",
+         })) &&
+        !SotClassLooksLikeMetadata(cls) &&
         SotClassContainsNone(cls, {
             "Service",
+            "ActionState",
+            "Component",
+            "Params",
+            "Data",
+            "Telemetry",
+            "Event",
+            "Input",
+            "Damager",
+            "Projectile",
+            "Target",
+            "Spawn",
+            "Setup",
+            "Behaviour",
+            "Animation",
+            "Audio",
+            "Settings",
+            "WorldSettings",
+            "Exclusion",
+            "Distribution",
         }))
         return ESotActorType::WorldEvent;
 

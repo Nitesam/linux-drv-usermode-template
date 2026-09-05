@@ -29,10 +29,11 @@ else
 fi
 
 echo "[3/4] Unloading old module..."
-"$SCRIPT_DIR/unload.sh" 2>/dev/null || true
+"$SCRIPT_DIR/unload.sh"
 
 echo "[4/4] Loading module..."
 insmod "$OUTPUT_DIR/memrw.ko"
 echo "  ✓ Module loaded"
-echo ""
-echo "  Done! Run: cd /root/NTS_WORK && sudo ./gsd-housekeeping"
+
+"$SCRIPT_DIR/create_device.sh"
+echo "  Done. Memory operations require CAP_SYS_PTRACE."

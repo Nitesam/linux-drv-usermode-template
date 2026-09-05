@@ -10,15 +10,13 @@ driver/.*.cmd
 driver/.tmp_versions/
 
 build
-build_codex
-build_codex_verify
+build_codex_bp_debug
 
 Finals_SDK
 
 Code
 out
 
-SDK
 FNames.txt
 
 # Build artifacts - usermode
@@ -40,6 +38,9 @@ Thumbs.db
 *.priv
 *.der
 
+SDK
+
+sot/
 #OLD_PROJECT
 DMA_HLL
-dbd_full_offsets_reference.txt
+#dbd_full_offsets_reference.txt

@@ -348,8 +348,6 @@ int main(int argc, char **argv)
         LOG_ERR("Driver open FAILED: %s", g_client.last_error().c_str());
     } else {
         g_status_msg = "Driver active";
-        if (g_client.hide_self())
-            g_status_msg += " | PID hidden";
     }
 
     g_target_pid = try_find_pid(g_client, g_init_game.get());
@@ -407,9 +405,9 @@ int main(int argc, char **argv)
         if (io.KeyCtrl && io.MouseWheel != 0.0f) {
             g_ui_scale += io.MouseWheel * 0.1f;
             if (g_ui_scale < 0.5f) g_ui_scale = 0.5f;
-            if (g_ui_scale > 2.0f) g_ui_scale = 2.0f;
+            if (g_ui_scale > 4.0f) g_ui_scale = 4.0f;
         }
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Equal))  { g_ui_scale += 0.1f; if (g_ui_scale > 2.0f) g_ui_scale = 2.0f; }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Equal))  { g_ui_scale += 0.1f; if (g_ui_scale > 4.0f) g_ui_scale = 4.0f; }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Minus))   { g_ui_scale -= 0.1f; if (g_ui_scale < 0.5f) g_ui_scale = 0.5f; }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0))       { g_ui_scale = 1.0f; }
         io.FontGlobalScale = g_ui_scale;

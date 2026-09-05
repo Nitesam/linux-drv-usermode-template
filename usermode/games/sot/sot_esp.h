@@ -129,8 +129,19 @@ public:
 
             if (!show) continue;
 
+            SotVector label_pos = o.position;
+            switch (o.type) {
+                case ESotActorType::Cannon:     label_pos.Z += 80.0f; break;
+                case ESotActorType::Animal:     label_pos.Z += 45.0f; break;
+                case ESotActorType::Chest:      label_pos.Z += 25.0f; break;
+                case ESotActorType::Barrel:     label_pos.Z += 40.0f; break;
+                case ESotActorType::Rowboat:    label_pos.Z += 80.0f; break;
+                case ESotActorType::Shipwreck:  label_pos.Z += 120.0f; break;
+                default: break;
+            }
+
             float sx, sy;
-            if (!world_to_screen(cam, o.position, sw, sh, sx, sy))
+            if (!world_to_screen(cam, label_pos, sw, sh, sx, sy))
                 continue;
 
             ImU32 shadow = IM_COL32(0, 0, 0, 180);

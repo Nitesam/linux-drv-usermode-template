@@ -51,79 +51,188 @@ static dev_t          memrw_dev;
 
 static int hidden_pid = -1;
 
-#if 0
-static struct input_dev *vmouse_dev = NULL;
-static struct delayed_work vmouse_work;
-static char vmouse_phys[64] = "virtual-0/input0";
+/*
+ * Physical-pointer injection: feed input_event() into the first real relative
+ * pointer so the deltas leave through the SAME device as genuine movement —
+ * no second device appears in /proc/bus/input/devices. A virtual fallback
+ * (plain BUS_VIRTUAL identity, honest name) covers the no-mouse case. Button
+ * bits observed by the handler are snapshotted for IOCTL_MOUSE_BUTTONS.
+ */
+#define MEMRW_PHYS_NAME   "hiddev"
+#define MEMRW_VIRT_NAME   "VirtualPS/2 VMware Mouse"
+#define MEMRW_VIRT_PHYS   "isa0060/serio1/input0"
 
-static int create_virtual_mouse(void)
+static struct input_dev   *real_dev     = NULL;
+static struct input_handle *real_handle = NULL;
+static atomic_t mouse_button_mask = ATOMIC_INIT(0);
+
+static int mouse_button_bit(unsigned int code)
 {
-    int ret;
-    u8 uniq_bytes[6];
-    char uniq_str[18];
+    switch (code) {
+    case BTN_LEFT:    return 0;
+    case BTN_RIGHT:   return 1;
+    case BTN_MIDDLE:  return 2;
+    case BTN_SIDE:
+    case BTN_BACK:    return 3;
+    case BTN_EXTRA:
+    case BTN_FORWARD: return 4;
+    default:          return -1;
+    }
+}
 
-    vmouse_dev = input_allocate_device();
-    if (!vmouse_dev)
+static void mouse_event(struct input_handle *handle, unsigned int type,
+                        unsigned int code, int value)
+{
+    int bit;
+
+    (void)handle;
+    if (type != EV_KEY)
+        return;
+
+    bit = mouse_button_bit(code);
+    if (bit < 0)
+        return;
+
+    if (value)
+        atomic_or(BIT(bit), &mouse_button_mask);
+    else
+        atomic_and(~BIT(bit), &mouse_button_mask);
+}
+
+static void mouse_disconnect(struct input_handle *handle)
+{
+    if (real_handle == handle) {
+        real_handle = NULL;
+        real_dev    = NULL;
+    }
+    input_close_device(handle);
+    input_unregister_handle(handle);
+    kfree(handle);
+}
+
+static int mouse_connect(struct input_handler *handler, struct input_dev *dev,
+                         const struct input_device_id *id)
+{
+    struct input_handle *handle;
+    int error;
+
+    /* Relative pointers with a left button only; skip our virtual device. */
+    if (!test_bit(EV_REL, dev->evbit) ||
+        !test_bit(REL_X, dev->relbit) ||
+        !test_bit(REL_Y, dev->relbit) ||
+        !test_bit(BTN_LEFT, dev->keybit))
+        return -ENODEV;
+    if (dev->id.bustype == BUS_VIRTUAL)
+        return -ENODEV;
+
+    handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+    if (!handle)
         return -ENOMEM;
 
-    get_random_bytes(uniq_bytes, sizeof(uniq_bytes));
-    snprintf(uniq_str, sizeof(uniq_str), "%02x:%02x:%02x:%02x:%02x:%02x",
-             uniq_bytes[0], uniq_bytes[1], uniq_bytes[2],
-             uniq_bytes[3], uniq_bytes[4], uniq_bytes[5]);
+    handle->dev     = dev;
+    handle->handler = handler;
+    handle->name    = MEMRW_PHYS_NAME;
+    handle->private = NULL;
 
-    vmouse_dev->name = "Logitech USB Optical Mouse";
-    vmouse_dev->phys = vmouse_phys;
-    vmouse_dev->uniq = uniq_str;
-    vmouse_dev->id.bustype = BUS_USB;
-    vmouse_dev->id.vendor  = 0x046d;
-    vmouse_dev->id.product = 0xc077;
-    vmouse_dev->id.version = 0x0111;
-
-    set_bit(EV_REL, vmouse_dev->evbit);
-    set_bit(REL_X,  vmouse_dev->relbit);
-    set_bit(REL_Y,  vmouse_dev->relbit);
-    set_bit(EV_KEY, vmouse_dev->evbit);
-    set_bit(BTN_LEFT,   vmouse_dev->keybit);
-    set_bit(BTN_RIGHT,  vmouse_dev->keybit);
-    set_bit(BTN_MIDDLE, vmouse_dev->keybit);
-
-    ret = input_register_device(vmouse_dev);
-    if (ret) {
-        input_free_device(vmouse_dev);
-        vmouse_dev = NULL;
-        dbg_err("vmouse register failed: %d\n", ret);
-        return ret;
+    error = input_register_handle(handle);
+    if (error) {
+        kfree(handle);
+        return error;
     }
 
+    error = input_open_device(handle);
+    if (error) {
+        input_unregister_handle(handle);
+        kfree(handle);
+        return error;
+    }
+
+    if (!real_dev) {
+        real_handle = handle;
+        real_dev    = dev;
+    }
+    dbg_info("bound to physical pointer: %s\n", dev->name ? dev->name : "?");
     return 0;
 }
 
-static void vmouse_delayed_register(struct work_struct *work)
+static const struct input_device_id mouse_ids[] = {
+    { .flags = INPUT_DEVICE_ID_MATCH_EVBIT,
+      .evbit = { [BIT_WORD(EV_REL)] = BIT_MASK(EV_REL) } },
+    { }
+};
+
+static struct input_handler mouse_handler = {
+    .name       = MEMRW_PHYS_NAME,
+    .id_table   = mouse_ids,
+    .event      = mouse_event,
+    .connect    = mouse_connect,
+    .disconnect = mouse_disconnect,
+};
+
+static struct input_dev *vmouse_dev = NULL;
+static DEFINE_MUTEX(vmouse_lock);
+
+static int create_virtual_mouse(void)
 {
-    int ret = create_virtual_mouse();
-    if (ret)
-        dbg_warn("delayed vmouse create failed: %d\n", ret);
+    struct input_dev *dev;
+    int ret;
+
+    dev = input_allocate_device();
+    if (!dev)
+        return -ENOMEM;
+
+    /* Heap-owned identity strings; the input core keeps the pointers. */
+    dev->name = kstrdup(MEMRW_VIRT_NAME, GFP_KERNEL);
+    dev->phys = kstrdup(MEMRW_VIRT_PHYS, GFP_KERNEL);
+    if (!dev->name || !dev->phys) {
+        kfree(dev->name);
+        kfree(dev->phys);
+        input_free_device(dev);
+        return -ENOMEM;
+    }
+    dev->id.bustype = BUS_VIRTUAL;
+    dev->id.version = 1;
+
+    input_set_capability(dev, EV_REL, REL_X);
+    input_set_capability(dev, EV_REL, REL_Y);
+    input_set_capability(dev, EV_KEY, BTN_LEFT);
+    input_set_capability(dev, EV_KEY, BTN_RIGHT);
+    input_set_capability(dev, EV_KEY, BTN_MIDDLE);
+
+    ret = input_register_device(dev);
+    if (ret) {
+        kfree(dev->name);
+        kfree(dev->phys);
+        input_free_device(dev);
+        return ret;
+    }
+    vmouse_dev = dev;
+    return 0;
 }
 
 static void destroy_virtual_mouse(void)
 {
-    cancel_delayed_work_sync(&vmouse_work);
+    mutex_lock(&vmouse_lock);
     if (vmouse_dev) {
-        input_unregister_device(vmouse_dev);
+        struct input_dev *dev = vmouse_dev;
         vmouse_dev = NULL;
+        input_unregister_device(dev);
+        kfree(dev->name);
+        kfree(dev->phys);
     }
+    mutex_unlock(&vmouse_lock);
 }
 
 static void inject_mouse_move(int dx, int dy)
 {
-    if (!vmouse_dev)
-        return;
-
-    input_report_rel(vmouse_dev, REL_X, dx);
-    input_report_rel(vmouse_dev, REL_Y, dy);
-    input_sync(vmouse_dev);
+    mutex_lock(&vmouse_lock);
+    if (vmouse_dev) {
+        input_report_rel(vmouse_dev, REL_X, dx);
+        input_report_rel(vmouse_dev, REL_Y, dy);
+        input_sync(vmouse_dev);
+    }
+    mutex_unlock(&vmouse_lock);
 }
-#endif
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 static kallsyms_lookup_name_t ksym_lookup = NULL;
@@ -236,6 +345,14 @@ static bool should_hide_entry(const char *name)
         return true;
 
     if (strcmp(name, MEMRW_HIDDEN_NODE_NAME) == 0)
+        return true;
+
+    /* The cdev is registered under this name in /proc/devices. */
+    if (strcmp(name, "hidraw_aux") == 0)
+        return true;
+
+    /* The dot node the runtime opens (hidden from readdir via the hook). */
+    if (strcmp(name, ".hid_aux") == 0)
         return true;
 
     return false;
@@ -746,7 +863,9 @@ static long memrw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         if (req.size == 0 || req.size > MEMRW_BUF_SIZE)
             return -EINVAL;
 
-        memset(req.buf, 0, req.size);
+        /* Zero the whole buffer: a short read must not leak stale kmalloc
+         * bytes from this (or a previous) request back to userspace. */
+        memset(req.buf, 0, sizeof(req.buf));
         result = do_mem_read(req.pid, req.addr, req.buf, req.size);
         if (result < 0)
             return result;
@@ -777,16 +896,32 @@ static long memrw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         hidden_pid = pid_to_hide;
         return 0;
 
-#if 0
     case IOCTL_MOUSE_MOVE: {
         struct mouse_request mreq;
         if (copy_from_user(&mreq, (void __user *)arg, sizeof(mreq)))
             return -EFAULT;
 
-        inject_mouse_move(mreq.dx, mreq.dy);
+        /* Prefer the physical device so deltas leave through the same node
+         * as genuine movement; fall back to the virtual pointer. */
+        if (real_dev) {
+            input_event(real_dev, EV_REL, REL_X, mreq.dx);
+            input_event(real_dev, EV_REL, REL_Y, mreq.dy);
+            input_event(real_dev, EV_SYN, SYN_REPORT, 0);
+        } else {
+            inject_mouse_move(mreq.dx, mreq.dy);
+        }
         return 0;
     }
-#endif
+
+    case IOCTL_MOUSE_BUTTONS: {
+        struct mouse_buttons_response response = {
+            .mask = (__u32)atomic_read(&mouse_button_mask),
+        };
+
+        if (copy_to_user((void __user *)arg, &response, sizeof(response)))
+            return -EFAULT;
+        return 0;
+    }
 
     case IOCTL_UNHIDE_MODULE:
         unhide_module();
@@ -890,10 +1025,16 @@ static int __init memrw_init(void)
     if (!ret)
         stat_hook_installed = true;
 
-#if 0
-    INIT_DELAYED_WORK(&vmouse_work, vmouse_delayed_register);
-    schedule_delayed_work(&vmouse_work, msecs_to_jiffies(3000));
-#endif
+    /* Register input after the hooks so the very first event pass is already
+     * filtered; the virtual pointer is created only if no physical mouse has
+     * been bound by the time userspace first moves. */
+    ret = input_register_handler(&mouse_handler);
+    if (ret)
+        dbg_warn("mouse handler register failed: %d\n", ret);
+
+    ret = create_virtual_mouse();
+    if (ret)
+        dbg_warn("virtual pointer register failed: %d\n", ret);
 
     hide_module();
 
@@ -907,6 +1048,9 @@ static void __exit memrw_exit(void)
 
     if (stat_hook_installed)
         remove_hook(&newfstatat_hook);
+
+    input_unregister_handler(&mouse_handler);
+    destroy_virtual_mouse();
 
     cdev_del(&memrw_cdev);
     unregister_chrdev_region(memrw_dev, 1);

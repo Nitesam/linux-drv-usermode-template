@@ -76,6 +76,18 @@ public:
         }
         state.debug.local_pawn = local_pawn;
         state.debug.camera_manager = camera_manager;
+        if (local_pawn) {
+            gnames_.debug_object_class_probe(client_, pid_, local_pawn,
+                                             state.debug.local_pawn_probe,
+                                             sizeof(state.debug.local_pawn_probe));
+
+            std::vector<std::string> local_chain;
+            if (gnames_.resolve_object_class_chain(client_, pid_, local_pawn, local_chain)) {
+                std::string chain_text = format_class_chain(local_chain);
+                snprintf(state.debug.local_pawn_class, sizeof(state.debug.local_pawn_class),
+                         "%s", chain_text.c_str());
+            }
+        }
 
         // ── Read camera ──────────────────────────────────────────
         if (read_camera(camera_manager, player_controller, local_pawn,
@@ -103,6 +115,7 @@ public:
         }
 
         std::unordered_set<uint64_t> seen_actors;
+        std::unordered_set<std::string> seen_bp_classes;
         int remaining_budget = 25000;
         bool scanned_levels = false;
 
@@ -121,14 +134,16 @@ public:
                     if (!SotIsLikelyPointer(level))
                         continue;
 
-                    scan_level(state, level, local_pawn, local_pos, seen_actors, remaining_budget);
+                    scan_level(state, level, local_pawn, local_pos,
+                               seen_actors, seen_bp_classes, remaining_budget);
                     scanned_levels = true;
                 }
             }
         }
 
         if (!scanned_levels && persistent_level) {
-            scan_level(state, persistent_level, local_pawn, local_pos, seen_actors, remaining_budget);
+            scan_level(state, persistent_level, local_pawn, local_pos,
+                       seen_actors, seen_bp_classes, remaining_budget);
         }
 
         state.player_count = (int)state.players.size();
@@ -147,6 +162,9 @@ private:
     std::string last_gnames_error_;
     bool       last_camera_ok_{false};
     SotMinimalViewInfo last_camera_{};
+    std::unordered_set<std::string> logged_bp_classes_;
+    uint32_t   cached_actor_array_offset_{SOT_LEVEL_ACTORS};
+    bool       cached_actor_array_offset_valid_{true};
 
     // ── Memory helpers ───────────────────────────────────────────
 
@@ -251,10 +269,62 @@ private:
         return false;
     }
 
-    ESotActorType resolve_actor_type(uint64_t actor, std::string& class_name) {
+    static bool class_chain_contains_any(const std::vector<std::string>& chain,
+                                         std::initializer_list<const char*> needles) {
+        for (const auto& name : chain) {
+            if (SotClassContainsAny(name, needles))
+                return true;
+        }
+        return false;
+    }
+
+    static std::string format_class_chain(const std::vector<std::string>& chain) {
+        std::string out;
+        for (size_t i = 0; i < chain.size(); ++i) {
+            if (i > 0)
+                out += " <- ";
+            out += chain[i];
+            if (out.size() > 150) {
+                out.resize(150);
+                break;
+            }
+        }
+        return out;
+    }
+
+    static bool class_chain_is_actor_like(const std::vector<std::string>& chain) {
+        for (const auto& name : chain) {
+            if (name == "Actor" || name == "AActor" ||
+                name == "Pawn" || name == "APawn" ||
+                name == "Character" || name == "ACharacter" ||
+                SotClassifyActor(name) != ESotActorType::Unknown)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static std::string choose_actor_class_name(const std::vector<std::string>& chain) {
+        for (const auto& name : chain) {
+            if (!SotIsProbablyBrokenClassName(name))
+                return name;
+        }
+        return {};
+    }
+
+    ESotActorType resolve_actor_type(uint64_t actor, std::string& class_name,
+                                     const std::vector<std::string>& class_chain) {
         ESotActorType type = SotClassifyActor(class_name);
 
-        if (!SotCanUseTrackedActorType(class_name))
+        bool can_use_tracked_type = SotCanUseTrackedActorType(class_name);
+        for (const auto& name : class_chain) {
+            if (SotCanUseTrackedActorType(name)) {
+                can_use_tracked_type = true;
+                break;
+            }
+        }
+        if (!can_use_tracked_type)
             return type;
 
         uint64_t tracked_actor_type = 0;
@@ -272,6 +342,10 @@ private:
             return tracked_type;
 
         bool generic_ai = SotClassContainsAny(class_name, {
+            "AthenaAICharacter",
+            "AICharacter",
+            "GoalDrivenCharacter",
+        }) || class_chain_contains_any(class_chain, {
             "AthenaAICharacter",
             "AICharacter",
             "GoalDrivenCharacter",
@@ -302,23 +376,135 @@ private:
         return v.X != 0.0f || v.Y != 0.0f || v.Z != 0.0f;
     }
 
-    bool read_level_actors(uint64_t level, SotTArray& actors_arr) {
+    int score_actor_array_candidate(const SotTArray& actors_arr) {
+        if (actors_arr.Count == 0 || actors_arr.Count >= 100000 ||
+            !SotIsLikelyPointer(actors_arr.Data))
+        {
+            return -100000;
+        }
+
+        constexpr int SAMPLE_LIMIT = 64;
+        uint64_t ptrs[SAMPLE_LIMIT]{};
+        int count = std::min<int>((int)actors_arr.Count, SAMPLE_LIMIT);
+        if (!read_mem(actors_arr.Data, ptrs, (size_t)count * 8))
+            return -100000;
+
+        int score = 0;
+        int valid_ptrs = 0;
+        for (int i = 0; i < count; ++i) {
+            uint64_t actor = ptrs[i];
+            if (!SotIsLikelyPointer(actor))
+                continue;
+
+            valid_ptrs++;
+            std::vector<std::string> chain;
+            if (!gnames_.resolve_object_class_chain(client_, pid_, actor, chain)) {
+                score -= 1;
+                continue;
+            }
+
+            if (class_chain_is_actor_like(chain))
+                score += 6;
+            else
+                score -= 1;
+
+            std::string class_name = choose_actor_class_name(chain);
+            if (!class_name.empty() &&
+                SotClassifyActor(class_name) != ESotActorType::Unknown)
+            {
+                score += 12;
+            }
+        }
+
+        if (valid_ptrs == 0)
+            return -100000;
+
+        return score;
+    }
+
+    bool read_level_actors(SotWorldState& state, uint64_t level, SotTArray& actors_arr) {
         actors_arr = {};
         if (!SotIsLikelyPointer(level))
             return false;
 
-        read_mem(level + SOT_LEVEL_ACTORS, &actors_arr, sizeof(actors_arr));
-        return actors_arr.Count > 0 &&
-               actors_arr.Count < 100000 &&
-               SotIsLikelyPointer(actors_arr.Data);
+        if (cached_actor_array_offset_valid_) {
+            SotTArray cached{};
+            if (read_mem(level + cached_actor_array_offset_, &cached, sizeof(cached)) &&
+                cached.Count > 0 &&
+                cached.Count < 100000 &&
+                SotIsLikelyPointer(cached.Data))
+            {
+                actors_arr = cached;
+                state.debug.actor_array_offset = cached_actor_array_offset_;
+                state.debug.actor_array_count = cached.Count;
+                state.debug.actor_array_score = 0;
+                return true;
+            }
+
+            cached_actor_array_offset_valid_ = false;
+        }
+
+        static const uint32_t candidate_offsets[] = {
+            0x98,
+            SOT_LEVEL_ACTORS,
+            0xA8,
+            0xB0,
+            0xB8,
+            0xC0,
+        };
+
+        SotTArray best_arr{};
+        uint32_t best_offset = 0;
+        int best_score = -100000;
+
+        for (uint32_t offset : candidate_offsets) {
+            SotTArray candidate{};
+            if (!read_mem(level + offset, &candidate, sizeof(candidate)))
+                continue;
+            int score = score_actor_array_candidate(candidate);
+            if (score > best_score) {
+                best_score = score;
+                best_arr = candidate;
+                best_offset = offset;
+            }
+        }
+
+        if (best_score <= 0) {
+            SotTArray fallback{};
+            if (!read_mem(level + SOT_LEVEL_ACTORS, &fallback, sizeof(fallback)) ||
+                fallback.Count == 0 ||
+                fallback.Count >= 100000 ||
+                !SotIsLikelyPointer(fallback.Data))
+            {
+                return false;
+            }
+
+            actors_arr = fallback;
+            cached_actor_array_offset_ = SOT_LEVEL_ACTORS;
+            cached_actor_array_offset_valid_ = true;
+            state.debug.actor_array_offset = SOT_LEVEL_ACTORS;
+            state.debug.actor_array_count = fallback.Count;
+            state.debug.actor_array_score = best_score;
+            return true;
+        }
+
+        actors_arr = best_arr;
+        cached_actor_array_offset_ = best_offset;
+        cached_actor_array_offset_valid_ = true;
+        state.debug.actor_array_offset = best_offset;
+        state.debug.actor_array_count = best_arr.Count;
+        state.debug.actor_array_score = best_score;
+        return true;
     }
 
     void scan_level(SotWorldState& state, uint64_t level,
                     uint64_t local_pawn, const SotVector& local_pos,
-                    std::unordered_set<uint64_t>& seen_actors, int& remaining_budget)
+                    std::unordered_set<uint64_t>& seen_actors,
+                    std::unordered_set<std::string>& seen_bp_classes,
+                    int& remaining_budget)
     {
         SotTArray actors_arr{};
-        if (!read_level_actors(level, actors_arr))
+        if (!read_level_actors(state, level, actors_arr))
             return;
 
         constexpr int BATCH = 256;
@@ -339,27 +525,47 @@ private:
                     continue;
 
                 state.debug.actor_scan_count++;
-                process_actor(state, actor, local_pawn, local_pos);
+                process_actor(state, actor, local_pawn, local_pos, seen_bp_classes);
                 remaining_budget--;
             }
         }
+    }
+
+    SotVector read_component_position(uint64_t component, int depth = 0) {
+        SotVector pos{};
+        if (!SotIsLikelyPointer(component) || depth > 8)
+            return pos;
+
+        // Walk the component attachment chain first. This avoids treating a
+        // child component's RelativeLocation as if it were already in world
+        // space, which is what makes distances appear static or nonsensical.
+        SotVector rel{};
+        bool has_rel = read_vec3(component + SOT_SCENE_RELATIVE_LOC, rel);
+
+        uint64_t attach_parent = read_ptr(component + SOT_SCENE_ATTACH_PARENT);
+        if (attach_parent && has_rel) {
+            SotVector parent_pos = read_component_position(attach_parent, depth + 1);
+            if (SotIsFiniteVec(parent_pos) && is_non_zero_vec(parent_pos))
+                return add_vec(parent_pos, rel);
+        }
+
+        if (has_rel && is_non_zero_vec(rel))
+            return rel;
+
+        // Keep the old derived ComponentToWorld probe as a last resort only.
+        if (read_vec3(component + SOT_SCENE_COMPONENT_TO_WORLD + SOT_TRANSFORM_TRANSLATION, pos) &&
+            is_non_zero_vec(pos))
+        {
+            return pos;
+        }
+
+        return {};
     }
 
     SotVector read_actor_position(uint64_t actor, int depth = 0) {
         SotVector pos{};
         if (!SotIsLikelyPointer(actor) || depth > 4)
             return pos;
-
-        uint64_t root = read_ptr(actor + SOT_ACTOR_ROOT_COMPONENT);
-        if (root) {
-            // Match the working internal flow: prefer the root component world
-            // translation and avoid probing nearby private fields.
-            if (read_vec3(root + SOT_SCENE_COMPONENT_TO_WORLD + SOT_TRANSFORM_TRANSLATION, pos) &&
-                is_non_zero_vec(pos))
-            {
-                return pos;
-            }
-        }
 
         // For replicated world actors like ships and floating loot, this is
         // usually the most stable absolute position.
@@ -385,11 +591,12 @@ private:
             }
         }
 
-        if (!root)
-            return {};
-
-        if (read_vec3(root + SOT_SCENE_RELATIVE_LOC, pos) && is_non_zero_vec(pos))
-            return pos;
+        uint64_t root = read_ptr(actor + SOT_ACTOR_ROOT_COMPONENT);
+        if (root) {
+            pos = read_component_position(root);
+            if (SotIsFiniteVec(pos) && is_non_zero_vec(pos))
+                return pos;
+        }
 
         return {};
     }
@@ -543,15 +750,68 @@ private:
 
     // ── Process a single actor ───────────────────────────────────
 
-    void process_actor(SotWorldState& state, uint64_t actor,
-                       uint64_t local_pawn, const SotVector& local_pos)
-    {
-        std::string class_name = gnames_.resolve_object_class_name(client_, pid_, actor);
-        if (!class_name.empty() && SotIsProbablyBrokenClassName(class_name))
+    static bool starts_with_bp_prefix(const std::string& class_name) {
+        return class_name.rfind("BP_", 0) == 0;
+    }
+
+    void record_bp_class(SotWorldState& state,
+                         const std::string& class_name,
+                         std::unordered_set<std::string>& seen_bp_classes) {
+        if (!starts_with_bp_prefix(class_name))
             return;
 
-        ESotActorType type = resolve_actor_type(actor, class_name);
+        state.debug.bp_actor_count++;
+        if (!seen_bp_classes.insert(class_name).second)
+            return;
+
+        state.debug.bp_classes.push_back(class_name);
+        if (logged_bp_classes_.insert(class_name).second)
+            LOG_DBG("[SoT] BP_ class found: %s", class_name.c_str());
+    }
+
+    void record_bp_classes(SotWorldState& state,
+                           const std::vector<std::string>& class_chain,
+                           std::unordered_set<std::string>& seen_bp_classes) {
+        for (const auto& name : class_chain)
+            record_bp_class(state, name, seen_bp_classes);
+    }
+
+    void process_actor(SotWorldState& state, uint64_t actor,
+                       uint64_t local_pawn, const SotVector& local_pos,
+                       std::unordered_set<std::string>& seen_bp_classes)
+    {
+        std::vector<std::string> class_chain;
+        if (!gnames_.resolve_object_class_chain(client_, pid_, actor, class_chain)) {
+            state.debug.class_resolve_fail_count++;
+            const char* err = gnames_.last_error();
+            if (err && err[0] != '\0')
+                snprintf(state.debug.class_resolve_error, sizeof(state.debug.class_resolve_error), "%s", err);
+            return;
+        }
+
+        record_bp_classes(state, class_chain, seen_bp_classes);
+
+        if (!class_chain_is_actor_like(class_chain)) {
+            state.debug.unknown_type_count++;
+            if (state.debug.unknown_actor_count < 32) {
+                std::string chain_text = format_class_chain(class_chain);
+                snprintf(state.debug.unknown_actors[state.debug.unknown_actor_count],
+                         64, "%s", chain_text.c_str());
+                state.debug.unknown_actor_count++;
+            }
+            return;
+        }
+
+        std::string class_name = choose_actor_class_name(class_chain);
+
+        if (!class_name.empty() && SotIsProbablyBrokenClassName(class_name)) {
+            state.debug.broken_class_name_count++;
+            return;
+        }
+
+        ESotActorType type = resolve_actor_type(actor, class_name, class_chain);
         if (type == ESotActorType::Unknown) {
+            state.debug.unknown_type_count++;
             if (state.debug.unknown_actor_count < 32) {
                 bool interesting =
                     class_name.find("BP_") != std::string::npos ||
@@ -559,7 +819,7 @@ private:
                     class_name.find("Pawn") != std::string::npos ||
                     class_name.find("Character") != std::string::npos ||
                     class_name.find("Tracked:") != std::string::npos;
-                if (interesting) {
+                if (interesting || state.debug.unknown_actor_count < 8) {
                     snprintf(state.debug.unknown_actors[state.debug.unknown_actor_count],
                              64, "%s", class_name.c_str());
                     state.debug.unknown_actor_count++;
@@ -568,11 +828,26 @@ private:
             return;
         }
 
+        state.debug.classified_actor_count++;
         SotVector pos = read_actor_position(actor);
-        if (!SotIsFiniteVec(pos) || (pos.X == 0 && pos.Y == 0 && pos.Z == 0))
+        if (!SotIsFiniteVec(pos) || (pos.X == 0 && pos.Y == 0 && pos.Z == 0)) {
+            state.debug.position_fail_count++;
+            if (state.debug.position_fail_sample_count < 8 && !class_name.empty()) {
+                snprintf(state.debug.position_fail_samples[state.debug.position_fail_sample_count],
+                         64, "%s", class_name.c_str());
+                state.debug.position_fail_sample_count++;
+            }
             return;
+        }
 
         float dist = SotVectorDistance(pos, local_pos);
+
+        if ((type == ESotActorType::Fort || type == ESotActorType::WorldEvent) &&
+            dist < 20000.0f &&
+            pos.Z < local_pos.Z - 1200.0f)
+        {
+            return;
+        }
 
         switch (type) {
             case ESotActorType::Player: {

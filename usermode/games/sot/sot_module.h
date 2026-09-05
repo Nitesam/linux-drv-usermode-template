@@ -7,11 +7,6 @@
 
 #include "imgui.h"
 
-#include <dirent.h>
-#include <fcntl.h>
-#include <limits.h>
-#include <unistd.h>
-
 class SotModule : public GameModule {
 public:
     SotModule() = default;
@@ -20,48 +15,18 @@ public:
     const char* process_name()  override { return "SotGame.exe"; }
     const char* module_filter() override { return "SotGame.exe"; }
     std::vector<const char*> alt_process_names() override {
-        return {"SotGame", "SeaOfThieves.exe", "SeaOfThieves", "SoT"};
-    }
-    int find_pid_fallback() override {
-        static const char* kNames[] = {
-            "SotGame.exe",
+        return {
             "SotGame",
+            "SoTGame.exe",
+            "SoTGame",
+            "SotGame-Win64-Shipping.exe",
+            "SotGame-Win64-Shipping",
+            "SoTGame-Win64-Shipping.exe",
+            "SoTGame-Win64-Shipping",
             "SeaOfThieves.exe",
             "SeaOfThieves",
+            "SoT",
         };
-
-        DIR* proc = opendir("/proc");
-        if (!proc)
-            return -1;
-
-        int found_pid = -1;
-        dirent* entry = nullptr;
-        while ((entry = readdir(proc)) != nullptr) {
-            if (!is_pid_dir(entry->d_name))
-                continue;
-
-            int pid = atoi(entry->d_name);
-            if (pid <= 0)
-                continue;
-
-            char path[64];
-            char cmdline[PATH_MAX];
-            snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
-            if (read_small_file(path, cmdline, sizeof(cmdline)) <= 0)
-                continue;
-
-            for (const char* name : kNames) {
-                if (basename_matches(cmdline, name)) {
-                    found_pid = pid;
-                    break;
-                }
-            }
-            if (found_pid > 0)
-                break;
-        }
-
-        closedir(proc);
-        return found_pid;
     }
 
     void update(MemClient& client, int pid, uint64_t base) override {
@@ -262,6 +227,10 @@ public:
                 ImGui::TableNextColumn(); ImGui::TextColored(dim, "%s", key);
                 ImGui::TableNextColumn(); ImGui::Text("%u", val);
             };
+            auto row_signed = [&](const char* key, int32_t val) {
+                ImGui::TableNextColumn(); ImGui::TextColored(dim, "%s", key);
+                ImGui::TableNextColumn(); ImGui::Text("%d", val);
+            };
             auto row_text = [&](const char* key, ImVec4 col, const char* val) {
                 ImGui::TableNextColumn(); ImGui::TextColored(dim, "%s", key);
                 ImGui::TableNextColumn(); ImGui::TextColored(col, "%s", val);
@@ -274,6 +243,10 @@ public:
             row_hex("LocalPawn", d.local_pawn ? ok : fail, d.local_pawn);
             row_hex("CameraManager", d.camera_manager ? ok : fail, d.camera_manager);
             row_text("GNames", d.gnames_ok ? ok : fail, d.gnames_ok ? "OK" : "FAILED");
+            if (d.local_pawn_class[0] != '\0')
+                row_text("LocalPawn Class", ok, d.local_pawn_class);
+            if (d.local_pawn_probe[0] != '\0')
+                row_text("LocalPawn Probe", dim, d.local_pawn_probe);
 
             ImGui::TableNextColumn(); ImGui::TextColored(dim, "Camera");
             ImGui::TableNextColumn();
@@ -288,11 +261,60 @@ public:
                 row_text("Camera Source", state_.has_camera ? ok : fail, d.camera_source);
 
             row_int("Actors Scanned", d.actor_scan_count);
+            if (d.actor_array_offset != 0) {
+                row_hex("Actor Array Off", ok, d.actor_array_offset);
+                row_int("Actor Array Count", d.actor_array_count);
+                row_signed("Actor Array Score", d.actor_array_score);
+            }
+            row_int("Class Resolve Fail", d.class_resolve_fail_count);
+            row_int("Broken Class Name", d.broken_class_name_count);
+            row_int("Unknown Type", d.unknown_type_count);
+            row_int("Classified OK", d.classified_actor_count);
+            row_int("Position Fail", d.position_fail_count);
+            row_int("BP_ Actors", d.bp_actor_count);
+            row_int("BP_ Classes", static_cast<uint32_t>(d.bp_classes.size()));
             row_int("Players", d.player_count);
             row_int("Ships", d.ship_count);
             row_int("Objects", d.object_count);
 
+            if (d.class_resolve_error[0] != '\0')
+                row_text("Resolve Error", fail, d.class_resolve_error);
+
             ImGui::EndTable();
+        }
+
+        if (!d.bp_classes.empty() &&
+            ImGui::CollapsingHeader("BP_ Classes Found", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::TextColored(dim, "Unique class names starting with BP_ in the current scan:");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy##sot_bp_classes")) {
+                std::string all;
+                for (const auto& cls : d.bp_classes) {
+                    all += cls;
+                    all += '\n';
+                }
+                if (!all.empty())
+                    ImGui::SetClipboardText(all.c_str());
+            }
+
+            ImGui::BeginChild("##sot_bp_class_list", ImVec2(0, 180), true,
+                              ImGuiWindowFlags_HorizontalScrollbar);
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(d.bp_classes.size()));
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f),
+                                       "%3d  %s", i + 1, d.bp_classes[(size_t)i].c_str());
+                }
+            }
+            ImGui::EndChild();
+        }
+
+        if (d.position_fail_sample_count > 0 && ImGui::CollapsingHeader("Position Fail Samples")) {
+            ImGui::TextColored(dim, "Classified actors discarded for invalid position:");
+            for (uint32_t i = 0; i < d.position_fail_sample_count; i++)
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  %s", d.position_fail_samples[i]);
         }
 
         if (d.unknown_actor_count > 0 && ImGui::CollapsingHeader("Unknown Actors")) {
@@ -376,65 +398,6 @@ public:
 
 private:
     explicit SotModule(const SotWorldState& s) : state_(s) {}
-
-    static bool is_pid_dir(const char* name) {
-        if (!name || !*name)
-            return false;
-        while (*name) {
-            if (*name < '0' || *name > '9')
-                return false;
-            ++name;
-        }
-        return true;
-    }
-
-    static char ascii_lower(char c) {
-        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
-    }
-
-    static bool equals_ignore_case(const char* a, const char* b) {
-        if (!a || !b)
-            return false;
-        while (*a && *b) {
-            if (ascii_lower(*a) != ascii_lower(*b))
-                return false;
-            ++a;
-            ++b;
-        }
-        return *a == '\0' && *b == '\0';
-    }
-
-    static const char* basename_ptr(const char* path) {
-        const char* base = path;
-        for (const char* p = path; *p; ++p) {
-            if (*p == '/' || *p == '\\')
-                base = p + 1;
-        }
-        return base;
-    }
-
-    static bool basename_matches(const char* path, const char* target) {
-        if (!path || !*path || !target || !*target)
-            return false;
-        return equals_ignore_case(basename_ptr(path), target);
-    }
-
-    static ssize_t read_small_file(const char* path, char* out, size_t out_size) {
-        if (!path || !out || out_size == 0)
-            return -1;
-
-        int fd = open(path, O_RDONLY);
-        if (fd < 0)
-            return -1;
-
-        ssize_t n = read(fd, out, out_size - 1);
-        close(fd);
-        if (n < 0)
-            return -1;
-
-        out[n] = '\0';
-        return n;
-    }
 
     std::unique_ptr<SotReader> reader_;
     SotWorldState state_{};

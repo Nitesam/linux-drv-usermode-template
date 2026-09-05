@@ -6,8 +6,8 @@
 #include <cmath>
 #include <string>
 
-#define DBD_EGS_GWORLD_OFFSET            0xC435E80
-#define DBD_EGS_GNAMES_OFFSET            0xC653100
+#define DBD_EGS_GWORLD_OFFSET            0xC719568
+#define DBD_EGS_GNAMES_OFFSET            0xC441800
 
 #define DBD_PERSISTENT_LEVEL             0x50
 #define DBD_OWNING_GAME_INSTANCE         0x250
@@ -39,7 +39,7 @@
 
 #define DBD_OBJECT_CLASS                 0x10
 #define DBD_OBJECT_NAME                  0x18
-#define DBD_PLAYER_STATE                 0x02F8
+#define DBD_PLAYER_STATE                 0x0310
 #define DBD_PAWN_PRIVATE                 0x0370
 #define DBD_ROOT_COMPONENT               0x01E0
 #define DBD_GAME_ROLE                    0x03DA

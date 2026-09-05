@@ -703,11 +703,40 @@ private:
         return true;
     }
 
-    static bool is_duplicate_object(const DbdObjectData& obj, const std::vector<DbdObjectData>& objects) {
-        if (obj.type != EDbdObjectType::EscapeDoor && obj.type != EDbdObjectType::Pallet)
+    static bool is_generator_actor_name(const std::string& name) {
+        const bool looks_like_generator =
+            name == "Generator" ||
+            name.find("BP_Generator") != std::string::npos ||
+            name.find("Generator") != std::string::npos;
+        if (!looks_like_generator)
             return false;
 
-        const float min_dist = (obj.type == EDbdObjectType::EscapeDoor) ? 800.0f : 250.0f;
+        static const char* non_generator_tokens[] = {
+            "Driven", "Linker", "Cosmetic", "Helper", "Entity", "Anim",
+            "Component", "Interaction", "Definition", "Aura", "Strategy",
+            "Damage", "Trap", "Progress", "Surrender", "Blockable",
+            "Snowball", "Skill", "Effect", "Achievement", "Evaluator",
+            "Action", "QEEvaluator", "Data", "Spawner", "Montage",
+            "Charge", "CatchUp", "Placer", "StaticMesh", "VFX",
+        };
+        for (const char* token : non_generator_tokens) {
+            if (name.find(token) != std::string::npos)
+                return false;
+        }
+        return true;
+    }
+
+    static bool is_duplicate_object(const DbdObjectData& obj, const std::vector<DbdObjectData>& objects) {
+        if (obj.type != EDbdObjectType::EscapeDoor &&
+            obj.type != EDbdObjectType::Pallet &&
+            obj.type != EDbdObjectType::Generator)
+            return false;
+
+        float min_dist = 250.0f;
+        if (obj.type == EDbdObjectType::EscapeDoor)
+            min_dist = 800.0f;
+        else if (obj.type == EDbdObjectType::Generator)
+            min_dist = 350.0f;
         for (const auto& other : objects) {
             if (other.type != obj.type)
                 continue;
@@ -718,7 +747,7 @@ private:
     }
 
     static bool classify_object(const std::string& name, EDbdObjectType& out) {
-        if (name.find("Generator") != std::string::npos)       { out = EDbdObjectType::Generator; return true; }
+        if (is_generator_actor_name(name))                     { out = EDbdObjectType::Generator; return true; }
         if (name.find("Totem") != std::string::npos)            { out = EDbdObjectType::Totem; return true; }
         if (is_pallet_actor_name(name))                         { out = EDbdObjectType::Pallet; return true; }
         if (name.find("MeatHook") != std::string::npos ||

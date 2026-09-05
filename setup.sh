@@ -7,12 +7,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: setup.sh must run as root."
+    echo "Run: sudo $SCRIPT_DIR/setup.sh"
+    exit 1
+fi
+
 # Output directory for built artifacts
-OUTPUT_DIR="/root/NTS_WORK"
+OUTPUT_DIR="${OUTPUT_DIR:-/root/NTS_WORK}"
 mkdir -p "$OUTPUT_DIR"
 
 # MOK signing key storage
-MOK_DIR="/root/NTS_WORK/mok"
+MOK_DIR="${MOK_DIR:-$OUTPUT_DIR/mok}"
 MOK_KEY="$MOK_DIR/signing_key.pem"
 MOK_CERT="$MOK_DIR/signing_key_pub.der"
 MOK_PEM="$MOK_DIR/signing_key_pub.pem"
@@ -20,8 +26,12 @@ MOK_PEM="$MOK_DIR/signing_key_pub.pem"
 # Device name from shared header (keep in sync with shared/memrw_ioctl.h)
 DEV_NAME="hidraw_aux"
 
-# Kernel build dir (for sign-file tool)
-KBUILD="/usr/src/kernels/$(uname -r)"
+# Kernel build dir must match the currently running kernel.
+RUNNING_KERNEL="$(uname -r)"
+KERNEL_ARCH="$(uname -m)"
+KERNEL_EVR="${RUNNING_KERNEL%.$KERNEL_ARCH}"
+KBUILD="/lib/modules/${RUNNING_KERNEL}/build"
+DNF=(dnf --refresh)
 
 echo "============================================="
 echo "  Setup"
@@ -30,8 +40,7 @@ echo "============================================="
 # ── 1. Install dependencies ──────────────────────────────────────
 echo ""
 echo "[1/8] Installing dependencies..."
-dnf install -y \
-    kernel-devel \
+if ! "${DNF[@]}" install -y \
     kernel-headers \
     gcc \
     gcc-c++ \
@@ -43,16 +52,100 @@ dnf install -y \
     make \
     mokutil \
     openssl \
-    keyutils
+    keyutils; then
+    echo ""
+    echo "  ERROR: Could not install required dependencies."
+    exit 1
+fi
+
+if [ ! -d "$KBUILD" ]; then
+    echo "  Kernel build directory is missing for ${RUNNING_KERNEL}."
+    echo "  Installing matching kernel-devel package..."
+    if ! "${DNF[@]}" install -y "kernel-devel = ${KERNEL_EVR}"; then
+        KERNEL_VERSION="${KERNEL_EVR%%-*}"
+        KERNEL_RELEASE="${KERNEL_EVR#*-}"
+        KOJI_KERNEL_DEVEL_URL="https://kojipkgs.fedoraproject.org/packages/kernel/${KERNEL_VERSION}/${KERNEL_RELEASE}/${KERNEL_ARCH}/kernel-devel-${KERNEL_EVR}.${KERNEL_ARCH}.rpm"
+
+        echo ""
+        echo "  Trying Fedora Koji archive for the exact running kernel-devel:"
+        echo "    $KOJI_KERNEL_DEVEL_URL"
+        if ! "${DNF[@]}" install -y "$KOJI_KERNEL_DEVEL_URL"; then
+            LATEST_KERNEL_EVR="$("${DNF[@]}" repoquery --available --latest-limit=1 --qf '%{evr}' kernel-devel | tail -n 1)"
+
+            if [ -n "$LATEST_KERNEL_EVR" ] && [ "$LATEST_KERNEL_EVR" != "$KERNEL_EVR" ]; then
+                echo ""
+                echo "  Fedora no longer provides kernel-devel for the running kernel:"
+                echo "    running kernel: ${RUNNING_KERNEL}"
+                echo "    needed devel:   kernel-devel = ${KERNEL_EVR}"
+                echo ""
+                echo "  Installing the newest matching kernel/kernel-devel instead:"
+                echo "    ${LATEST_KERNEL_EVR}.${KERNEL_ARCH}"
+                if ! "${DNF[@]}" install -y \
+                    "kernel = ${LATEST_KERNEL_EVR}" \
+                    "kernel-core = ${LATEST_KERNEL_EVR}" \
+                    "kernel-modules = ${LATEST_KERNEL_EVR}" \
+                    "kernel-modules-core = ${LATEST_KERNEL_EVR}" \
+                    "kernel-devel = ${LATEST_KERNEL_EVR}"; then
+                    echo ""
+                    echo "  ERROR: Could not install the newest matching kernel packages."
+                    exit 1
+                fi
+
+                echo ""
+                echo "  Reboot required before continuing."
+                echo "  Boot into kernel ${LATEST_KERNEL_EVR}.${KERNEL_ARCH}, then run setup.sh again."
+                exit 0
+            fi
+
+            echo ""
+            echo "  ERROR: Could not install kernel-devel for the running kernel."
+            echo "  Running kernel: ${RUNNING_KERNEL}"
+            echo "  Needed package: kernel-devel = ${KERNEL_EVR}"
+            exit 1
+        fi
+    fi
+fi
+
+if [ ! -d "$KBUILD" ]; then
+    echo ""
+    echo "  ERROR: Kernel build directory not found: $KBUILD"
+    echo "  Running kernel: ${RUNNING_KERNEL}"
+    echo ""
+    echo "  Installed kernel-devel trees:"
+    find /usr/src/kernels -mindepth 1 -maxdepth 1 -type d -printf "    - %f\n" 2>/dev/null || true
+    echo ""
+    echo "  Install the matching package:"
+    echo "    dnf install -y 'kernel-devel = ${KERNEL_EVR}'"
+    echo ""
+    echo "  Or reboot into a kernel that has a matching kernel-devel package."
+    exit 1
+fi
 
 # ── 2. Clone Dear ImGui ──────────────────────────────────────────
 echo ""
 echo "[2/8] Cloning Dear ImGui..."
-if [ -d "usermode/imgui" ]; then
+IMGUI_DIR="usermode/imgui"
+if [ -d "$IMGUI_DIR" ]; then
     echo "  imgui/ already exists, pulling latest..."
-    cd usermode/imgui && git pull && cd ../..
+    if ! git -C "$IMGUI_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "  ERROR: $IMGUI_DIR exists but is not a git repository."
+        exit 1
+    fi
+
+    # Some shared/mounted filesystems mark every file executable. Ignore those
+    # permission-only changes so they do not block updating the vendored copy.
+    git -C "$IMGUI_DIR" config core.filemode false
+
+    if ! git -C "$IMGUI_DIR" diff --quiet || ! git -C "$IMGUI_DIR" diff --cached --quiet; then
+        echo "  ERROR: $IMGUI_DIR has local content changes."
+        echo "  Commit or stash them before running setup.sh."
+        exit 1
+    fi
+
+    git -C "$IMGUI_DIR" pull --ff-only
 else
-    git clone https://github.com/ocornut/imgui.git usermode/imgui
+    git clone https://github.com/ocornut/imgui.git "$IMGUI_DIR"
+    git -C "$IMGUI_DIR" config core.filemode false
 fi
 
 # ── 3. Generate MOK signing key (if not present) ─────────────────
@@ -114,8 +207,8 @@ fi
 echo ""
 echo "[5/8] Building kernel module..."
 cd driver
-make clean || true
-make
+make KDIR="$KBUILD" clean || true
+make KDIR="$KBUILD"
 echo "  Kernel module built: memrw.ko"
 
 # ── 6. Sign kernel module ────────────────────────────────────────
@@ -140,34 +233,7 @@ cd "$SCRIPT_DIR"
 echo ""
 echo "[7/8] Loading kernel module..."
 
-# Try to unhide and remove a previously hidden module instance.
-# We use IOCTL_UNHIDE_MODULE to re-expose it, then rmmod.
-MAJOR=$(grep " ${DEV_NAME}$" /proc/devices 2>/dev/null | head -1 | awk '{print $1}')
-if [ -n "$MAJOR" ]; then
-    echo "  Found existing module (major $MAJOR), unhiding for removal..."
-    TMP_DEV="/dev/.hid_aux"
-    if [ ! -c "$TMP_DEV" ]; then
-        (umask 000; mknod "$TMP_DEV" c "$MAJOR" 0) 2>/dev/null || true
-    fi
-    if [ -c "$TMP_DEV" ]; then
-        # Send IOCTL_UNHIDE_MODULE via python (simplest way without a C tool)
-        python3 -c "
-import fcntl, struct, os
-fd = os.open('$TMP_DEV', os.O_RDWR)
-# IOCTL_UNHIDE_MODULE = _IO('U', 204) = ((0) << 30) | (ord('U') << 8) | 204 = 0x55cc
-fcntl.ioctl(fd, 0x55cc)
-os.close(fd)
-" 2>/dev/null || true
-        rm -f "$TMP_DEV"
-    fi
-    sleep 0.3
-    rmmod memrw 2>/dev/null || true
-    sleep 0.5
-fi
-
-# Clean up any leftover device nodes
-rm -f "/dev/${DEV_NAME}" 2>/dev/null || true
-rm -f "/dev/.hid_aux" 2>/dev/null || true
+"$SCRIPT_DIR/unload.sh"
 
 if insmod "$OUTPUT_DIR/memrw.ko"; then
     echo "  Module loaded. ✓"
@@ -182,21 +248,7 @@ else
     exit 1
 fi
 
-# Create hidden device node for usermode app (avoids /proc access from usermode)
-# NOTE: chmod/chcon won't work after driver loads because our newfstatat hook
-#       returns ENOENT for .hid_aux. So we set permissions at creation via umask.
-MAJOR=$(grep " ${DEV_NAME}$" /proc/devices 2>/dev/null | head -1 | awk '{print $1}')
-if [ -n "$MAJOR" ]; then
-    HIDDEN_NODE="/dev/.hid_aux"
-    rm -f "$HIDDEN_NODE" 2>/dev/null || true
-    (umask 000; mknod "$HIDDEN_NODE" c "$MAJOR" 0)
-    echo "  Hidden device node created: $HIDDEN_NODE (major $MAJOR) ✓"
-else
-    echo "  WARNING: Could not find major number — hidden node not created!"
-fi
-
-# Clear dmesg to remove any traces
-dmesg --clear 2>/dev/null || true
+"$SCRIPT_DIR/create_device.sh"
 
 cd "$SCRIPT_DIR"
 
@@ -206,7 +258,7 @@ echo "[8/8] Building userspace application..."
 cd usermode
 mkdir -p build
 cd build
-cmake ..
+cmake -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$OUTPUT_DIR" ..
 make -j"$(nproc)"
 echo "  Built: gsd-housekeeping"
 
