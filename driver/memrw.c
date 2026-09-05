@@ -257,7 +257,7 @@ static int resolve_kallsyms(void)
     return 0;
 }
 
-static void disable_yama_ptrace(void)
+static void __maybe_unused disable_yama_ptrace(void)
 {
     int *ptrace_scope = NULL;
 
@@ -417,10 +417,11 @@ static struct ftrace_hook getdents64_hook = {
 
 static bool hook_installed = false;
 
-typedef asmlinkage long (*sys_newfstatat_t)(const struct pt_regs *);
+/* Retained for reference; intentionally uninstalled (see memrw_init). */
+typedef asmlinkage long (*sys_newfstatat_t)(const struct pt_regs *) __maybe_unused;
 static sys_newfstatat_t orig_newfstatat = NULL;
 
-static asmlinkage long hooked_newfstatat(const struct pt_regs *regs)
+static __maybe_unused asmlinkage long hooked_newfstatat(const struct pt_regs *regs)
 {
     char filename[256];
     const char __user *user_path = (const char __user *)regs->si;
@@ -438,13 +439,13 @@ static asmlinkage long hooked_newfstatat(const struct pt_regs *regs)
     return orig_newfstatat(regs);
 }
 
-static struct ftrace_hook newfstatat_hook = {
+static __maybe_unused struct ftrace_hook newfstatat_hook = {
     .name     = "__x64_sys_newfstatat",
     .function = hooked_newfstatat,
     .original = &orig_newfstatat,
 };
 
-static bool stat_hook_installed = false;
+static bool stat_hook_installed __maybe_unused = false;
 
 
 
@@ -1001,7 +1002,9 @@ static int __init memrw_init(void)
     if (ret)
         return ret;
 
-    disable_yama_ptrace();
+    /* Yama stays at the distribution default: the memory reader runs under
+     * a dedicated uid with CAP_SYS_PTRACE, which bypasses ptrace_scope=1
+     * without weakening the kernel-wide policy (visible to usermode ACs). */
 
     ret = alloc_chrdev_region(&memrw_dev, 0, 1, "hidraw_aux");
     if (ret < 0)
@@ -1021,9 +1024,10 @@ static int __init memrw_init(void)
     if (!ret)
         hook_installed = true;
 
-    ret = install_hook(&newfstatat_hook);
-    if (!ret)
-        stat_hook_installed = true;
+    /* The newfstatat hook is intentionally NOT installed: with the runtime
+     * under a dedicated uid the node is 0600 to another user, so stat-ok +
+     * open-EACCES is normal Linux behaviour. Forcing stat to ENOENT while
+     * open succeeds is a self-inflicted hook signature. */
 
     /* Register input after the hooks so the very first event pass is already
      * filtered; the virtual pointer is created only if no physical mouse has
@@ -1045,9 +1049,6 @@ static void __exit memrw_exit(void)
 {
     if (hook_installed)
         remove_hook(&getdents64_hook);
-
-    if (stat_hook_installed)
-        remove_hook(&newfstatat_hook);
 
     input_unregister_handler(&mouse_handler);
     destroy_virtual_mouse();
